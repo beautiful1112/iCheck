@@ -1,0 +1,11 @@
+[
+  {
+    "targets": ["10.20.30.40"],
+    "labels": {
+      "site": "HKG",
+      "device": "edge-hkg-01",
+      "snmp_auth": "network_v3",
+      "snmp_module": "if_mib"
+    }
+  }
+]

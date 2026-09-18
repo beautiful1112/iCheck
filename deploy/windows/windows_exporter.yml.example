@@ -1,0 +1,18 @@
+collectors:
+  enabled: cpu,logical_disk,memory,net,os,service,system
+
+collector:
+  service:
+    include: "^(windows_exporter|W32Time|WinRM)$"
+
+log:
+  level: warn
+
+scrape:
+  timeout-margin: 0.5
+
+telemetry:
+  path: /metrics
+
+web:
+  listen-address: ":9182"

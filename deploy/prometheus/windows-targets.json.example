@@ -1,0 +1,10 @@
+[
+  {
+    "targets": ["10.20.7.42:9182"],
+    "labels": {
+      "site": "HKG",
+      "device": "win-app-01",
+      "platform": "windows"
+    }
+  }
+]

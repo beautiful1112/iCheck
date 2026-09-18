@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: icheck
+      POSTGRES_USER: icheck
+      POSTGRES_PASSWORD: icheck
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U icheck -d icheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - icheck-postgres:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ICHECK_DATABASE_URL: postgresql+psycopg://icheck:icheck@postgres:5432/icheck
+      ICHECK_AUTO_CREATE_SCHEMA: "false"
+      ICHECK_SEED_DATA: "true"
+      ICHECK_CORS_ORIGINS: http://localhost:5173
+      ICHECK_COLLECTOR_REGISTRATION_TOKEN: local-development-registration-token-change-me
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  dashboard:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      NEXT_PUBLIC_ICHECK_API_URL: http://localhost:8000/api/v1
+    depends_on:
+      - api
+    ports:
+      - "5173:5173"
+
+volumes:
+  icheck-postgres:

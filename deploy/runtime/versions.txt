@@ -1,0 +1,2 @@
+prometheus 3.13.3 linux-amd64 sha256 b349c732d8a853e657d0e7ae1bbad4d11b586615fb65fdc59d896b9f869c001e
+snmp_exporter 0.30.1 linux-amd64 sha256 026aac4e23447ed593a783eccab9089cd41d77d17c9d2a0ab84398e45a0bb93e

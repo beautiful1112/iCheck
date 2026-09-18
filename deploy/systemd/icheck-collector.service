@@ -1,0 +1,22 @@
+[Unit]
+Description=iCheck distributed collector worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=icheck
+Group=icheck
+EnvironmentFile=/etc/icheck/collector.env
+WorkingDirectory=/opt/icheck
+ExecStart=/opt/icheck/.venv/bin/icheck-collector
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/icheck
+
+[Install]
+WantedBy=multi-user.target
