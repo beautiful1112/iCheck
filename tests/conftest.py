@@ -3,10 +3,15 @@ import os
 os.environ["ICHECK_DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
 os.environ["ICHECK_AUTO_CREATE_SCHEMA"] = "true"
 os.environ["ICHECK_COLLECTOR_REGISTRATION_TOKEN"] = "test-registration-token"
+os.environ["ICHECK_AGENT_REGISTRATION_TOKEN"] = "test-agent-registration-token"
 os.environ["ICHECK_METRICS_ALLOWED_HOSTS"] = (
     "prometheus.example.test,metrics.example.test"
 )
 os.environ["ICHECK_AI_ALLOWED_HOSTS"] = "models.example.test"
+os.environ["ICHECK_CONTROL_PLANE_AUTH_MODE"] = "disabled"
+os.environ["ICHECK_CONTROL_PLANE_BOOTSTRAP_TOKEN"] = (
+    "test-control-plane-bootstrap-token"
+)
 os.environ["ICHECK_TEST_AI_PROVIDER_TOKEN"] = "unit-test-provider-token"
 
 import pytest

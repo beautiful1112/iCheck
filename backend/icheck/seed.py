@@ -10,6 +10,8 @@ from .builtin_artifacts import (
     ensure_snmp_exporter_artifact,
     ensure_windows_exporter_artifact,
 )
+from .builtin_activation_policies import ensure_builtin_activation_policies
+from .builtin_agent_tools import ensure_builtin_agent_tools
 from .models import AlertSeverity, Device
 from .schemas import (
     AlertEvent,
@@ -19,6 +21,7 @@ from .schemas import (
     WirelessSnapshot,
 )
 from .services.alerts import ensure_default_rules, upsert_alert
+from .services.control_plane_auth import ensure_builtin_roles
 from .services.inventory import ingest_network_observations, ingest_wireless_snapshot
 
 
@@ -26,9 +29,17 @@ def seed() -> None:
     init_db()
     with SessionLocal() as db:
         ensure_default_rules(db)
-        ensure_snmp_exporter_artifact(db)
-        ensure_windows_exporter_artifact(db)
-        ensure_psrp_cim_artifact(db)
+        ensure_builtin_roles(db)
+        snmp_artifact = ensure_snmp_exporter_artifact(db)
+        windows_exporter_artifact = ensure_windows_exporter_artifact(db)
+        psrp_cim_artifact = ensure_psrp_cim_artifact(db)
+        ensure_builtin_activation_policies(
+            db,
+            snmp_artifact=snmp_artifact,
+            windows_exporter_artifact=windows_exporter_artifact,
+            psrp_cim_artifact=psrp_cim_artifact,
+        )
+        ensure_builtin_agent_tools(db)
         if (db.scalar(select(func.count()).select_from(Device)) or 0) > 0:
             return
 

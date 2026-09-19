@@ -2,10 +2,10 @@
 
 ## Milestone boundary
 
-This is the first M2 foundation slice while the project remains in the latter
-part of M1 overall. It configures provider endpoints, credential references,
-model identities, and bounded purpose routes. It does not execute prompts or
-run a LangGraph investigation.
+This is the governed configuration boundary for the M2 runtime while production
+M1 identity and credential-provider gates remain open. It configures provider
+endpoints, credential references, model identities, ordered fallback, and
+bounded purpose routes consumed by the LangGraph investigation worker.
 
 The administration UI is available at `/settings/ai`. The API surface is:
 
@@ -32,22 +32,30 @@ GET  /api/v1/ai/routes
 4. Create an OpenAI-compatible provider with that credential profile name or ID.
 5. Run the provider health check. It calls the bounded `/models` endpoint and
    persists only status, model count, a redacted error, and audit metadata.
-6. Register model profiles and bind each task purpose to a primary model plus
-   iteration, tool-call, timeout, and token budgets.
+6. Register model profiles with `chat` and `json_schema` capabilities.
+7. Bind each task purpose to a primary model, zero or more ordered fallback
+   models, and iteration, tool-call, timeout, and token budgets.
 
 Supported authentication modes are `none`, `bearer`, and `api_key`. The latter
 uses the fixed `X-API-Key` header. Provider requests reject credentials embedded
 in URLs, query strings, fragments, redirects, unapproved hosts, oversized
 responses, and invalid OpenAI-compatible model-list envelopes.
 
+When an investigation is created, it snapshots the primary and fallback IDs as
+well as every execution budget. Runtime fallback therefore cannot be changed by
+later route edits. Retryable candidate failures are individually audited and
+the successful decision is charged for the cumulative provider-reported tokens
+across failed and successful candidates. Request-size and investigation-deadline
+failures stop immediately rather than trying another provider.
+
 ## Current limitations
 
 - The environment resolver is the only active server-side secret provider.
   Vault, cloud KMS/secret managers, and rotation workflows remain open.
-- Provider health checks validate `/models`; prompt/inference calls are not yet
-  implemented.
-- Routing budgets are persisted policy inputs. LangGraph does not consume them
-  until the InvestigationState, Tool Registry, policy gate, and checkpoint
-  runtime are implemented.
-- User/RBAC enforcement is still an M1 production gate; the current UI uses the
-  provisional audit actor `platform.admin`.
+- Provider health checks validate `/models`; the automated inference and
+  fallback suites use controlled OpenAI-compatible gateways. Live-provider
+  compatibility and fallback acceptance remain open.
+- Persistent principals, roles, token authentication, and investigation
+  permission snapshots are implemented. Browser OIDC/session integration and
+  authorization on every AI-settings route remain M1 production gates; the
+  development UI still submits the provisional audit actor `platform.admin`.

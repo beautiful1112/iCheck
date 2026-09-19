@@ -43,6 +43,10 @@ from ..models import (
 from ..schema_validation import validate_instance, validate_schema
 from ..worker_auth import issue_worker_token
 from .audit import record_audit_event
+from .runtime_health import (
+    reconcile_activated_deployments,
+    reconcile_completed_run,
+)
 
 
 SENSITIVE_KEYS = {
@@ -339,9 +343,10 @@ def publish_artifact_version(
     return version
 
 
-def create_deployment(
-    db: Session, payload: CollectorDeploymentCreate
-) -> CollectorDeployment:
+def validate_deployment_payload(
+    db: Session,
+    payload: CollectorDeploymentCreate,
+) -> tuple[ArtifactVersion, str | None]:
     version = db.scalar(
         select(ArtifactVersion)
         .where(ArtifactVersion.id == payload.artifact_version_id)
@@ -414,6 +419,16 @@ def create_deployment(
                     f"for credential profile {credential_ref!r}"
                 )
 
+    return version, credential_ref
+
+
+def create_deployment(
+    db: Session,
+    payload: CollectorDeploymentCreate,
+    *,
+    commit: bool = True,
+) -> CollectorDeployment:
+    version, credential_ref = validate_deployment_payload(db, payload)
     deployment_values = payload.model_dump()
     deployment_values["credential_profile_ref"] = credential_ref
     deployment = CollectorDeployment(**deployment_values)
@@ -433,11 +448,13 @@ def create_deployment(
                 "credential_profile_configured": credential_ref is not None,
             },
         )
-        db.commit()
+        if commit:
+            db.commit()
     except IntegrityError as exc:
         db.rollback()
         raise ValueError("Collector deployment name already exists") from exc
-    db.refresh(deployment)
+    if commit:
+        db.refresh(deployment)
     return deployment
 
 
@@ -571,6 +588,7 @@ def claim_deployments(
     if worker.state != CollectorWorkerState.ONLINE:
         raise ValueError("Only online workers can claim deployments")
 
+    reconcile_activated_deployments(db)
     now = utcnow()
     lease_expires_at = now + timedelta(seconds=payload.lease_seconds)
     candidates = db.scalars(
@@ -804,6 +822,7 @@ def complete_run(
     deployment.lease_token_hash = None
     deployment.lease_expires_at = None
     deployment.updated_at = now
+    reconcile_completed_run(db, run)
     record_audit_event(
         db,
         event_type="collector.run.completed",

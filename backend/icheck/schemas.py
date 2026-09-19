@@ -35,7 +35,9 @@ class DeviceCreate(APIModel):
     vendor: str | None = Field(default=None, max_length=128)
     model: str | None = Field(default=None, max_length=128)
     site: str | None = Field(default=None, max_length=128)
+    labels: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
+    created_by: str = Field(default="api.user", min_length=1, max_length=255)
 
     @field_validator("management_ip")
     @classmethod
@@ -45,6 +47,7 @@ class DeviceCreate(APIModel):
 
 class DeviceRead(DeviceCreate):
     id: str
+    onboarding_status: str
     created_at: datetime
     updated_at: datetime
 
@@ -230,4 +233,3 @@ class DashboardSummary(APIModel):
     critical_alerts: int
     recent_alerts: list[AlertRead]
     recent_endpoints: list[EndpointRead]
-

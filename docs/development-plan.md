@@ -126,10 +126,59 @@ Progress:
   `icheck` account, loopback-only listeners, protected configuration, systemd
   startup, and bounded local retention. Config validation, self-scrapes,
   bounded PromQL, and restart recovery passed.
+- Added a dedicated web device-onboarding workflow and protocol-neutral Assets
+  API. Operators can register network, controller, Linux, Windows, and other
+  targets; declare SNMP, HTTPS API, SSH, windows_exporter, WinRM HTTPS, and ICMP
+  connection intents; attach site-scoped credential references; and search the
+  resulting inventory without placing raw inventory tables on the AI home.
+- Added transactional device/connection persistence, duplicate and scope
+  validation, secret-shape rejection, immutable onboarding audit evidence, a
+  clean Alembic migration, and end-to-end API coverage. New connections remain
+  pending until worker verification; configuration is not reported as live
+  monitoring.
+- Added authenticated, leased device-preflight claim/report contracts with
+  site and adapter-capability matching, lease expiry/reassignment, bounded and
+  secret-checked evidence, immutable attempt history, explicit operator retry,
+  device readiness aggregation, and a response-bounded history API.
+- Connected the standalone worker to the preflight loop. ICMP performs a
+  bounded echo, HTTP/SSH/Windows connections perform allowlisted TCP transport
+  checks without claiming authentication, and SNMP performs a bounded query
+  through the site-local SNMP Exporter. Results and failures are visible in the
+  Assets page with audit evidence.
+- Added versioned device-activation policies with draft, validation,
+  publication, previous-version deprecation, deterministic placeholders, and
+  collector-schema validation. Verified connection intent is rendered into a
+  previewable deployment plan whose immutable hash must be approved.
+- Added atomic, idempotent activation and audited deactivation. Activation
+  reuses the collector control plane, enforces artifact publication,
+  protocol/adapter compatibility, credential and worker scope, and leaves
+  deactivated deployments disabled with history intact.
+- Added published built-in activation policies for SNMP Exporter,
+  windows_exporter, and on-demand PSRP/CIM. The Assets page supports policy
+  selection, plan/warning preview, reasoned approval, and reasoned deactivation.
+- Verified the activation slice with a clean full migration, idempotent seed,
+  TypeScript/lint checks, and a production frontend build.
+- Added persistent activation runtime health and approved-deployment
+  fingerprints. Worker polling and run completion reconcile first success,
+  consecutive failure, freshness, missing/disabled deployments, and content
+  drift into explainable connection and device states.
+- Added promotion from `monitoring_configured` to `active` only after fresh
+  successful scheduled runs; failed/stale collection becomes `degraded`.
+  Re-approving the unchanged plan repairs drift atomically and resets health for
+  fresh acceptance. The Assets page exposes status, reason, timestamps, failure
+  count, and repair preview.
+- Verified the combined activation and runtime-health slice with a clean
+  migration through `e84b7a2d19c3`, idempotent seed, 38 backend tests, and a
+  Node 22 production frontend build.
+- Added persistent control-plane principals, built-in and custom roles, scoped
+  role bindings, one-time bootstrap, hash-only revocable access tokens, and
+  audited identity administration. Production refuses to start with
+  control-plane authentication disabled.
 
 Remaining before M1 exit:
 
-- mTLS/certificate identity and control-plane user/RBAC authentication.
+- mTLS/certificate identity, browser OIDC/session integration, and RBAC/scope
+  enforcement across every legacy control-plane route.
 - External credential-provider adapters and short-lived worker-side resolution.
 - Isolated sandbox execution for generated implementations and fixtures.
 - Real-device SNMP positive/negative target validation, remote-write backend
@@ -173,7 +222,7 @@ Remaining before M1 exit:
 
 ## M2 — AI operator kernel
 
-Status: **Next — foundation in progress**, while M1 production gates remain open
+Status: **In progress**, while M1 production gates remain open
 
 Foundation completed:
 
@@ -188,9 +237,86 @@ Foundation completed:
   tool calls, wall-clock time, and tokens.
 - Added the dedicated `/settings/ai` page instead of placing provider and model
   configuration on the operations home page.
+- Added persistent Investigation, immutable product checkpoint, evidence
+  reference, typed Tool Registry, and audited tool-call tables and APIs through
+  migration `f31a6c9d2e54`.
+- Added strict InvestigationState and hypothesis contracts, immutable objective
+  and scope, monotonic iteration/token accounting, wall-clock and tool budgets,
+  duplicate-call prevention, secret-shape rejection, JSON Schema validation,
+  bounded results, and deterministic escalation.
+- Added the LangGraph reason → tools → evidence → reason kernel. It supports an
+  official checkpoint saver, uses investigation IDs as thread IDs, and has
+  PostgreSQL saver setup with strict MessagePack configuration.
+- Added product checkpoint mirroring so each meaningful graph node updates the
+  immutable iCheck investigation trace while LangGraph retains execution state.
+- Added built-in, typed, database-backed `inventory.get_device` and
+  `alerts.list_open` read-only tools. Core tools run in process; MCP remains an
+  extension boundary and currently fails closed.
+- Added `inventory.get_endpoint_history` with exact ID/MAC/IP selection,
+  ambiguity rejection, active-first bounded IP/wired/Wi-Fi controller history,
+  and data minimization that omits endpoint usernames and raw vendor payloads.
+- Added the diagnose-risk `metrics.query_instant` tool over the existing
+  allowlisted Prometheus-compatible boundary. PromQL length, timeouts, series
+  count, response bytes, schemas, evidence, and audit are bounded; audit stores
+  the query hash rather than the expression.
+- Added a real OpenAI-compatible `/chat/completions` reasoner using the governed
+  provider/model/credential settings, bounded request/response sizes, structured
+  decision validation, gateway token usage, a deadline-aware timeout, and
+  redacted success/failure audit.
+- Added ordered fallback-model selection in AI settings and immutable candidate
+  snapshots on investigations. The reasoner skips disabled candidates and
+  retries retryable provider, transport, response, and structured-decision
+  failures within the original wall-clock deadline. Every attempt is audited;
+  failed candidates' reported tokens accumulate with the successful candidate
+  and still enforce the investigation token budget.
+- Verified an end-to-end two-iteration loop over a controlled model gateway:
+  plan, device tool call, evidence persistence, reevaluation, conclusion,
+  confidence, uncertainty, LangGraph checkpoint, and product checkpoint.
+- Added persistent agent workers and one durable execution per investigation,
+  bootstrap enrollment with rotating bearer tokens, provider capability matching,
+  atomic leases, renewal, expiry takeover, attempt counters, and cooperative
+  cancellation.
+- Added ordered execution events, cursor-based JSON reads, resumable SSE using
+  `Last-Event-ID`, graph-node progress, and bounded terminal/timeout behavior.
+- Added a standalone PostgreSQL-only agent worker with per-node ownership checks,
+  lease renewal, cancellation observation, fresh-run versus checkpoint-resume
+  dispatch, terminal acknowledgement, crash-gap reconciliation, and a hardened
+  systemd unit.
+- Verified graph interruption, graph reconstruction with the same thread ID,
+  continuation without replaying the completed tool, worker execution, stale
+  lease reassignment, cancellation, and terminal-commit crash reconciliation.
+- Replaced the conventional monitoring dashboard with the initial AI L1
+  operator workspace. An operator can submit an outcome, create and start a
+  durable investigation, follow resumable SSE execution progress, cancel an
+  active execution, and inspect its conclusion, confidence, uncertainty,
+  evidence ledger, tool activity, prioritized alerts, agent capacity, and real
+  collector gaps. The home page contains no synthetic fallback inventory;
+  endpoint and device details remain under Assets.
+- Documented the implemented information architecture, endpoint dependencies,
+  failure states, and remaining authorization/approval gates in
+  `docs/operator-workspace.md`. The slice passes frontend lint and a Node 22
+  production build.
+- Added immutable principal, permission, and authorization-scope snapshots to
+  investigations. Model tool projection, tool-call persistence, and database
+  execution independently enforce each tool's required permissions.
+- Added durable, exact-plan action proposals and four-eyes decisions. LangGraph
+  pauses before a change, the requester cannot self-approve, stale hashes fail,
+  and a decision resumes the same checkpointed thread. Ambiguous `executing`
+  actions are never automatically replayed after worker loss.
+- Added the dedicated `/approvals` review page with full arguments, plan hash,
+  requester, reasoned approve/reject controls, and audit-backed status.
 
-This foundation is not an Agent Runtime. No model inference, LangGraph state,
-tool execution, evidence loop, or autonomous investigation is claimed yet.
+Current boundary:
+
+- The PostgreSQL saver adapter is wired, but live PostgreSQL restart/resume
+  acceptance has not run. In-memory tests prove graph rebuild/resume semantics;
+  they do not prove a process crash against the production database.
+- Per-target scope enforcement, MCP execution, topology/range-metric/log/Windows
+  tools, deeper situation drill-down, and production change adapters with
+  post-check/rollback remain open. Fallback is covered by controlled gateways
+  but still requires live provider compatibility acceptance.
+- The integration gateway is simulated in tests; no external model endpoint is
+  contacted by the automated suite.
 
 ### Scope
 
@@ -326,12 +452,13 @@ capability and policy, not enabled by a global switch.
 
 ## Immediate implementation backlog
 
-The local non-container Prometheus/SNMP installation portion was completed and
-verified on 2026-09-18. The immediate backlog continues M1 while preparing M2
-interfaces:
+The local non-container Prometheus/SNMP installation, device onboarding, and
+automatic preflight slices were completed and verified on 2026-09-18. The
+immediate backlog continues M1 while preparing M2 interfaces:
 
-1. Enroll representative SNMP devices, run positive and denied-target tests,
-   measure series cardinality, and validate a scalable remote-write backend.
+1. When the lab is ready, enroll representative SNMP devices through the web
+   UI, run positive and denied-target tests, measure series cardinality, and
+   validate a scalable remote-write backend.
 2. Install and validate windows_exporter on a representative Windows host.
 3. Add mTLS, control-plane RBAC, and an external credential-provider adapter;
    connect the PSRP/CIM executor only after that boundary passes review.
@@ -340,10 +467,12 @@ interfaces:
 6. Complete the `AgentProfile`, privacy/cost policy, and external Vault/KMS
    credential-provider contracts; provider, model, routing, and environment
    secret-reference schemas are implemented.
-7. Define the LangGraph `InvestigationState` and Tool Registry contracts before
-   implementing the loop.
-8. Produce the AI L1 information architecture and route map before redesigning
-   the frontend.
+7. Run PostgreSQL process-kill/resume and multi-worker lease-race acceptance for
+   the implemented agent worker, validate fallback against live providers, then
+   add permission policy.
+8. Exercise the implemented AI L1 workspace against the lab and a live model
+   route, then add authenticated identities, permission-aware tool visibility,
+   durable approval interactions, and deeper situation drill-down.
 
 ## Definition of done for every capability
 

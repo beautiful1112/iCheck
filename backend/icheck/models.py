@@ -11,6 +11,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -93,6 +94,21 @@ class CollectorRunStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 
+class AgentWorkerState(str, enum.Enum):
+    ONLINE = "online"
+    DRAINING = "draining"
+    OFFLINE = "offline"
+
+
+class AgentExecutionStatus(str, enum.Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    WAITING_APPROVAL = "waiting_approval"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class EnvelopeKind(str, enum.Enum):
     ENTITY = "entity"
     RELATIONSHIP = "relationship"
@@ -110,7 +126,12 @@ class Device(Base):
     vendor: Mapped[str | None] = mapped_column(String(128), nullable=True)
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     site: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    labels: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    onboarding_status: Mapped[str] = mapped_column(
+        String(32), default="pending_verification", index=True
+    )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), default="api.user")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -124,6 +145,245 @@ class Device(Base):
     )
     wireless_sessions: Mapped[list[WirelessClientSession]] = relationship(
         back_populates="controller"
+    )
+    connections: Mapped[list[DeviceConnection]] = relationship(
+        back_populates="device",
+        cascade="all, delete-orphan",
+        order_by="DeviceConnection.protocol",
+    )
+
+
+class DeviceConnection(Base):
+    __tablename__ = "device_connections"
+    __table_args__ = (
+        UniqueConstraint(
+            "device_id",
+            "protocol",
+            name="uq_device_connection_protocol",
+        ),
+        CheckConstraint(
+            "port IS NULL OR (port > 0 AND port <= 65535)",
+            name="ck_device_connection_port",
+        ),
+        Index(
+            "ix_device_connection_verification",
+            "verification_status",
+            "updated_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    device_id: Mapped[str] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"), index=True
+    )
+    protocol: Mapped[str] = mapped_column(String(32), index=True)
+    adapter_type: Mapped[str] = mapped_column(String(128), index=True)
+    port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    credential_profile_ref: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    worker_selector: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    configuration: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    verification_status: Mapped[str] = mapped_column(
+        String(32), default="pending", index=True
+    )
+    last_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_verification_error: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    last_verification_worker_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True
+    )
+    last_verification_latency_ms: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    last_verification_evidence: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict
+    )
+    verification_worker_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True
+    )
+    verification_lease_token_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    verification_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    next_verification_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True, default=utcnow
+    )
+    created_by: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    device: Mapped[Device] = relationship(back_populates="connections")
+    preflights: Mapped[list[DeviceConnectionPreflight]] = relationship(
+        back_populates="connection",
+        cascade="all, delete-orphan",
+        order_by="DeviceConnectionPreflight.started_at.desc()",
+    )
+    activation: Mapped[DeviceConnectionActivation | None] = relationship(
+        back_populates="connection",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+
+class DeviceConnectionPreflight(Base):
+    __tablename__ = "device_connection_preflights"
+    __table_args__ = (
+        CheckConstraint(
+            "latency_ms IS NULL OR latency_ms >= 0",
+            name="ck_device_preflight_latency_nonnegative",
+        ),
+        Index(
+            "ix_device_preflight_connection_started",
+            "connection_id",
+            "started_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    connection_id: Mapped[str] = mapped_column(
+        ForeignKey("device_connections.id", ondelete="CASCADE"), index=True
+    )
+    worker_id: Mapped[str] = mapped_column(
+        ForeignKey("collector_workers.id", ondelete="RESTRICT"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(32), default="running", index=True)
+    lease_token_hash: Mapped[str] = mapped_column(String(64))
+    lease_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    connection: Mapped[DeviceConnection] = relationship(back_populates="preflights")
+    worker: Mapped[CollectorWorker] = relationship(back_populates="device_preflights")
+
+
+class DeviceActivationPolicy(Base):
+    __tablename__ = "device_activation_policies"
+    __table_args__ = (
+        UniqueConstraint("name", "version", name="uq_device_activation_policy_version"),
+        CheckConstraint("version > 0", name="ck_device_activation_policy_version_positive"),
+        CheckConstraint(
+            "schedule_seconds > 0",
+            name="ck_device_activation_policy_schedule_positive",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[ArtifactVersionStatus] = mapped_column(
+        Enum(ArtifactVersionStatus, native_enum=False, length=16),
+        default=ArtifactVersionStatus.DRAFT,
+        index=True,
+    )
+    protocol: Mapped[str] = mapped_column(String(32), index=True)
+    adapter_type: Mapped[str] = mapped_column(String(128), index=True)
+    artifact_version_id: Mapped[str] = mapped_column(
+        ForeignKey("artifact_versions.id", ondelete="RESTRICT"), index=True
+    )
+    target_template: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    configuration_defaults: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    worker_selector: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    execution_mode: Mapped[CollectorDeploymentMode] = mapped_column(
+        Enum(CollectorDeploymentMode, native_enum=False, length=16),
+        default=CollectorDeploymentMode.SCHEDULED,
+        index=True,
+    )
+    schedule_seconds: Mapped[int] = mapped_column(Integer, default=300)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    validated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    validated_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    published_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class DeviceConnectionActivation(Base):
+    __tablename__ = "device_connection_activations"
+    __table_args__ = (
+        UniqueConstraint("connection_id", name="uq_device_connection_activation"),
+        UniqueConstraint("deployment_id", name="uq_device_activation_deployment"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    connection_id: Mapped[str] = mapped_column(
+        ForeignKey("device_connections.id", ondelete="CASCADE"), index=True
+    )
+    policy_id: Mapped[str] = mapped_column(
+        ForeignKey("device_activation_policies.id", ondelete="RESTRICT"), index=True
+    )
+    deployment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("collector_deployments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    plan_hash: Mapped[str] = mapped_column(String(64))
+    expected_deployment_hash: Mapped[str] = mapped_column(String(64))
+    runtime_status: Mapped[str] = mapped_column(
+        String(32), default="awaiting_first_run", index=True
+    )
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    last_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("collector_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    last_run_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_run_finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_success_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_failure_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_evaluated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    health_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approved_by: Mapped[str] = mapped_column(String(255))
+    approval_reason: Mapped[str] = mapped_column(Text)
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    deactivated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    deactivated_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    connection: Mapped[DeviceConnection] = relationship(back_populates="activation")
+    policy: Mapped[DeviceActivationPolicy] = relationship()
+    deployment: Mapped[CollectorDeployment | None] = relationship()
+    last_run: Mapped[CollectorRun | None] = relationship(
+        foreign_keys=[last_run_id]
     )
 
 
@@ -543,6 +803,342 @@ class AIModelRoute(Base):
     )
 
 
+class AgentToolRegistration(Base):
+    __tablename__ = "agent_tool_registrations"
+    __table_args__ = (
+        CheckConstraint("timeout_seconds > 0", name="ck_agent_tool_timeout_positive"),
+        CheckConstraint(
+            "max_result_bytes > 0",
+            name="ck_agent_tool_result_bytes_positive",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text)
+    transport: Mapped[str] = mapped_column(String(32), index=True)
+    handler: Mapped[str] = mapped_column(String(512))
+    input_schema: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    output_schema: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    risk_level: Mapped[str] = mapped_column(String(32), index=True)
+    read_only: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    required_permissions: Mapped[list[str]] = mapped_column(JSON, default=list)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=30)
+    max_result_bytes: Mapped[int] = mapped_column(Integer, default=1_000_000)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_by: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class Investigation(Base):
+    __tablename__ = "investigations"
+    __table_args__ = (
+        CheckConstraint("max_iterations > 0", name="ck_investigation_iterations_positive"),
+        CheckConstraint("max_tool_calls > 0", name="ck_investigation_tools_positive"),
+        CheckConstraint("timeout_seconds > 0", name="ck_investigation_timeout_positive"),
+        CheckConstraint("token_budget > 0", name="ck_investigation_tokens_positive"),
+        CheckConstraint("iterations_used >= 0", name="ck_investigation_iterations_used"),
+        CheckConstraint("tool_calls_used >= 0", name="ck_investigation_tools_used"),
+        CheckConstraint("tokens_used >= 0", name="ck_investigation_tokens_used"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    title: Mapped[str] = mapped_column(String(255))
+    objective: Mapped[str] = mapped_column(Text)
+    scope: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    route_id: Mapped[str] = mapped_column(
+        ForeignKey("ai_model_routes.id", ondelete="RESTRICT"), index=True
+    )
+    model_id: Mapped[str] = mapped_column(
+        ForeignKey("ai_model_configs.id", ondelete="RESTRICT"), index=True
+    )
+    fallback_model_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    max_iterations: Mapped[int] = mapped_column(Integer)
+    max_tool_calls: Mapped[int] = mapped_column(Integer)
+    timeout_seconds: Mapped[int] = mapped_column(Integer)
+    token_budget: Mapped[int] = mapped_column(Integer)
+    iterations_used: Mapped[int] = mapped_column(Integer, default=0)
+    tool_calls_used: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_used: Mapped[int] = mapped_column(Integer, default=0)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    conclusion: Mapped[str | None] = mapped_column(Text, nullable=True)
+    uncertainty: Mapped[list[str]] = mapped_column(JSON, default=list)
+    escalation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requested_by_principal_id: Mapped[str | None] = mapped_column(
+        ForeignKey("control_plane_principals.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    permission_snapshot: Mapped[list[str]] = mapped_column(JSON, default=list)
+    authorization_scope: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str] = mapped_column(String(255))
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class InvestigationCheckpoint(Base):
+    __tablename__ = "investigation_checkpoints"
+    __table_args__ = (
+        UniqueConstraint(
+            "investigation_id",
+            "sequence",
+            name="uq_investigation_checkpoint_sequence",
+        ),
+        CheckConstraint("sequence > 0", name="ck_investigation_checkpoint_sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    investigation_id: Mapped[str] = mapped_column(
+        ForeignKey("investigations.id", ondelete="CASCADE"), index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    node: Mapped[str] = mapped_column(String(128), index=True)
+    state: Mapped[dict[str, Any]] = mapped_column(JSON)
+    state_hash: Mapped[str] = mapped_column(String(64))
+    created_by: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class InvestigationEvidence(Base):
+    __tablename__ = "investigation_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "investigation_id",
+            "evidence_type",
+            "evidence_id",
+            name="uq_investigation_evidence_reference",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    investigation_id: Mapped[str] = mapped_column(
+        ForeignKey("investigations.id", ondelete="CASCADE"), index=True
+    )
+    evidence_type: Mapped[str] = mapped_column(String(64), index=True)
+    evidence_id: Mapped[str] = mapped_column(String(512), index=True)
+    summary: Mapped[str] = mapped_column(Text)
+    observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class InvestigationToolCall(Base):
+    __tablename__ = "investigation_tool_calls"
+    __table_args__ = (
+        UniqueConstraint(
+            "investigation_id",
+            "call_hash",
+            name="uq_investigation_tool_call_hash",
+        ),
+        CheckConstraint("iteration > 0", name="ck_investigation_tool_iteration"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    investigation_id: Mapped[str] = mapped_column(
+        ForeignKey("investigations.id", ondelete="CASCADE"), index=True
+    )
+    tool_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_tool_registrations.id", ondelete="RESTRICT"), index=True
+    )
+    iteration: Mapped[int] = mapped_column(Integer)
+    call_hash: Mapped[str] = mapped_column(String(64))
+    arguments: Mapped[dict[str, Any]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(32), default="proposed", index=True)
+    result: Mapped[dict[str, Any] | list[Any] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    result_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AgentActionProposal(Base):
+    __tablename__ = "agent_action_proposals"
+    __table_args__ = (
+        UniqueConstraint(
+            "investigation_id",
+            "plan_hash",
+            name="uq_agent_action_proposal_plan",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    investigation_id: Mapped[str] = mapped_column(
+        ForeignKey("investigations.id", ondelete="CASCADE"), index=True
+    )
+    tool_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_tool_registrations.id", ondelete="RESTRICT"), index=True
+    )
+    tool_call_id: Mapped[str | None] = mapped_column(
+        ForeignKey("investigation_tool_calls.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
+    )
+    iteration: Mapped[int] = mapped_column(Integer)
+    arguments: Mapped[dict[str, Any]] = mapped_column(JSON)
+    purpose: Mapped[str] = mapped_column(Text)
+    plan_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    requested_by_principal_id: Mapped[str | None] = mapped_column(
+        ForeignKey("control_plane_principals.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    requested_by: Mapped[str] = mapped_column(String(255))
+    approved_by_principal_id: Mapped[str | None] = mapped_column(
+        ForeignKey("control_plane_principals.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    approved_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    execution_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    execution_finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class AgentWorker(Base):
+    __tablename__ = "agent_workers"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    capabilities: Mapped[list[str]] = mapped_column(JSON, default=list)
+    labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    auth_token_hash: Mapped[str] = mapped_column(String(64))
+    token_issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    state: Mapped[AgentWorkerState] = mapped_column(
+        Enum(AgentWorkerState, native_enum=False, length=16),
+        default=AgentWorkerState.ONLINE,
+        index=True,
+    )
+    last_heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class AgentExecution(Base):
+    __tablename__ = "agent_executions"
+    __table_args__ = (
+        CheckConstraint(
+            "attempt_count >= 0",
+            name="ck_agent_execution_attempt_count",
+        ),
+        Index(
+            "ix_agent_execution_claim",
+            "status",
+            "lease_expires_at",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    investigation_id: Mapped[str] = mapped_column(
+        ForeignKey("investigations.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    status: Mapped[AgentExecutionStatus] = mapped_column(
+        Enum(AgentExecutionStatus, native_enum=False, length=24),
+        default=AgentExecutionStatus.QUEUED,
+        index=True,
+    )
+    worker_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_workers.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    lease_token_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    cancellation_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    cancellation_requested_by: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    cancellation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class AgentExecutionEvent(Base):
+    __tablename__ = "agent_execution_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_id",
+            "sequence",
+            name="uq_agent_execution_event_sequence",
+        ),
+        CheckConstraint(
+            "sequence > 0",
+            name="ck_agent_execution_event_sequence",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_executions.id", ondelete="CASCADE"), index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    event_type: Mapped[str] = mapped_column(String(128), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
 class CollectorWorker(Base):
     __tablename__ = "collector_workers"
 
@@ -572,6 +1168,9 @@ class CollectorWorker(Base):
         back_populates="lease_worker"
     )
     runs: Mapped[list[CollectorRun]] = relationship(back_populates="worker")
+    device_preflights: Mapped[list[DeviceConnectionPreflight]] = relationship(
+        back_populates="worker"
+    )
 
 
 class CollectorDeployment(Base):
@@ -706,6 +1305,106 @@ class CollectionEnvelope(Base):
     )
 
     run: Mapped[CollectorRun] = relationship(back_populates="envelopes")
+
+
+class ControlPlanePrincipal(Base):
+    __tablename__ = "control_plane_principals"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    subject: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(255))
+    principal_type: Mapped[str] = mapped_column(
+        String(32), default="user", index=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_by: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    role_bindings: Mapped[list[ControlPlaneRoleBinding]] = relationship(
+        back_populates="principal", cascade="all, delete-orphan"
+    )
+    access_tokens: Mapped[list[ControlPlaneAccessToken]] = relationship(
+        back_populates="principal", cascade="all, delete-orphan"
+    )
+
+
+class ControlPlaneRole(Base):
+    __tablename__ = "control_plane_roles"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    permissions: Mapped[list[str]] = mapped_column(JSON, default=list)
+    system: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_by: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    bindings: Mapped[list[ControlPlaneRoleBinding]] = relationship(
+        back_populates="role"
+    )
+
+
+class ControlPlaneRoleBinding(Base):
+    __tablename__ = "control_plane_role_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "principal_id", "role_id", name="uq_control_plane_role_binding"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    principal_id: Mapped[str] = mapped_column(
+        ForeignKey("control_plane_principals.id", ondelete="CASCADE"), index=True
+    )
+    role_id: Mapped[str] = mapped_column(
+        ForeignKey("control_plane_roles.id", ondelete="RESTRICT"), index=True
+    )
+    scope: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    principal: Mapped[ControlPlanePrincipal] = relationship(
+        back_populates="role_bindings"
+    )
+    role: Mapped[ControlPlaneRole] = relationship(back_populates="bindings")
+
+
+class ControlPlaneAccessToken(Base):
+    __tablename__ = "control_plane_access_tokens"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    principal_id: Mapped[str] = mapped_column(
+        ForeignKey("control_plane_principals.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(255))
+    token_prefix: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    revoked_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    revocation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    principal: Mapped[ControlPlanePrincipal] = relationship(
+        back_populates="access_tokens"
+    )
 
 
 class AuditEvent(Base):

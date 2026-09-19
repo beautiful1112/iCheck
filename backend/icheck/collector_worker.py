@@ -18,6 +18,10 @@ from .collectors import (
     collect_snmp_exporter,
     collect_windows_exporter,
 )
+from .device_preflight_worker import (
+    DevicePreflightFailure,
+    execute_device_preflight,
+)
 
 
 class ControlPlaneClient:
@@ -138,6 +142,80 @@ def run_assignment(
         return False
 
 
+def run_device_preflight(
+    client: ControlPlaneClient,
+    worker_id: str,
+    assignment: dict[str, Any],
+    *,
+    allowed_targets: list[str],
+    timeout_seconds: int,
+    snmp_exporter_url: str | None,
+    exporter_allowed_hosts: list[str],
+    snmp_allowed_targets: list[str],
+    lease_seconds: int,
+) -> bool:
+    preflight_id = assignment["preflight_id"]
+    lease_token = assignment["lease_token"]
+    try:
+        evidence, latency_ms = execute_device_preflight(
+            assignment,
+            allowed_targets=allowed_targets,
+            timeout_seconds=timeout_seconds,
+            snmp_exporter_url=snmp_exporter_url,
+            exporter_allowed_hosts=exporter_allowed_hosts,
+            snmp_allowed_targets=snmp_allowed_targets,
+            lease_seconds=lease_seconds,
+        )
+        payload = {
+            "lease_token": lease_token,
+            "status": "verified",
+            "latency_ms": latency_ms,
+            "evidence": evidence,
+        }
+        succeeded = True
+    except DevicePreflightFailure as exc:
+        payload = {
+            "lease_token": lease_token,
+            "status": "failed",
+            "latency_ms": exc.latency_ms,
+            "evidence": exc.evidence,
+            "error": str(exc)[:2000],
+        }
+        succeeded = False
+    except Exception as exc:
+        payload = {
+            "lease_token": lease_token,
+            "status": "failed",
+            "evidence": {
+                "check": "worker_execution",
+                "verified": False,
+            },
+            "error": str(exc)[:2000],
+        }
+        succeeded = False
+    try:
+        client.request(
+            "POST",
+            (
+                f"/api/v1/collector-workers/{worker_id}/device-preflights/"
+                f"{preflight_id}/complete"
+            ),
+            payload,
+        )
+    except Exception as exc:
+        print(
+            f"failed to report device preflight {preflight_id}: {exc}",
+            file=sys.stderr,
+        )
+        return False
+    if not succeeded:
+        print(
+            f"device preflight {preflight_id} failed: {payload['error']}",
+            file=sys.stderr,
+        )
+    return succeeded
+
+
 def run_once(
     client: ControlPlaneClient,
     worker_id: str,
@@ -149,6 +227,10 @@ def run_once(
     snmp_allowed_targets: list[str],
     windows_exporter_allowed_hosts: list[str],
     windows_allowed_targets: list[str],
+    max_preflights: int,
+    preflight_allowed_targets: list[str],
+    preflight_timeout_seconds: int,
+    preflight_snmp_exporter_url: str | None,
     psrp_cim_executor: Any | None = None,
 ) -> tuple[int, int]:
     client.request(
@@ -162,6 +244,15 @@ def run_once(
         {
             "max_assignments": max_assignments,
             "lease_seconds": lease_seconds,
+        },
+    )
+    preflight_lease_seconds = min(lease_seconds, 600)
+    preflights = client.request(
+        "POST",
+        f"/api/v1/collector-workers/{worker_id}/device-preflights/claim",
+        {
+            "max_assignments": max_preflights,
+            "lease_seconds": preflight_lease_seconds,
         },
     )
     for item in assignments:
@@ -185,7 +276,26 @@ def run_once(
             )
         )
     succeeded = sum(outcomes)
-    return succeeded, len(assignments) - succeeded
+    with ThreadPoolExecutor(max_workers=max(1, len(preflights))) as executor:
+        preflight_outcomes = list(
+            executor.map(
+                lambda item: run_device_preflight(
+                    client,
+                    worker_id,
+                    item,
+                    allowed_targets=preflight_allowed_targets,
+                    timeout_seconds=preflight_timeout_seconds,
+                    snmp_exporter_url=preflight_snmp_exporter_url,
+                    exporter_allowed_hosts=exporter_allowed_hosts,
+                    snmp_allowed_targets=snmp_allowed_targets,
+                    lease_seconds=preflight_lease_seconds,
+                ),
+                preflights,
+            )
+        )
+    succeeded += sum(preflight_outcomes)
+    total = len(assignments) + len(preflights)
+    return succeeded, total - succeeded
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -220,6 +330,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--max-assignments",
         type=int,
         default=int(os.getenv("ICHECK_COLLECTOR_MAX_ASSIGNMENTS", "1")),
+    )
+    parser.add_argument(
+        "--max-preflights",
+        type=int,
+        default=int(os.getenv("ICHECK_COLLECTOR_MAX_PREFLIGHTS", "2")),
+    )
+    parser.add_argument(
+        "--preflight-timeout-seconds",
+        type=int,
+        default=int(os.getenv("ICHECK_COLLECTOR_PREFLIGHT_TIMEOUT_SECONDS", "5")),
+    )
+    parser.add_argument(
+        "--preflight-allowed-target",
+        action="append",
+        dest="preflight_allowed_targets",
+        default=None,
+        help="Exact IP or CIDR allowed for device connection preflights",
+    )
+    parser.add_argument(
+        "--preflight-snmp-exporter-url",
+        default=os.getenv("ICHECK_COLLECTOR_PREFLIGHT_SNMP_EXPORTER_URL"),
+        help="Site-local SNMP Exporter base URL used for SNMP preflights",
     )
     parser.add_argument(
         "--http-allowed-host",
@@ -347,12 +479,30 @@ def main(argv: list[str] | None = None) -> int:
             ).split(",")
             if item.strip()
         ]
+    preflight_allowed_targets = args.preflight_allowed_targets
+    if preflight_allowed_targets is None:
+        preflight_allowed_targets = [
+            item.strip()
+            for item in os.getenv(
+                "ICHECK_COLLECTOR_PREFLIGHT_ALLOWED_TARGETS",
+                "",
+            ).split(",")
+            if item.strip()
+        ]
     if args.poll_seconds < 1 or args.poll_seconds > 300:
         raise SystemExit("--poll-seconds must be between 1 and 300")
     if args.lease_seconds < 15 or args.lease_seconds > 3600:
         raise SystemExit("--lease-seconds must be between 15 and 3600")
     if args.max_assignments < 1 or args.max_assignments > 20:
         raise SystemExit("--max-assignments must be between 1 and 20")
+    if args.max_preflights < 1 or args.max_preflights > 20:
+        raise SystemExit("--max-preflights must be between 1 and 20")
+    if args.preflight_timeout_seconds < 1 or args.preflight_timeout_seconds > 30:
+        raise SystemExit("--preflight-timeout-seconds must be between 1 and 30")
+    if args.preflight_timeout_seconds + 5 >= min(args.lease_seconds, 600):
+        raise SystemExit(
+            "preflight timeout must leave at least 5 seconds in the lease"
+        )
 
     client = ControlPlaneClient(args.control_plane)
     registration = client.request(
@@ -383,6 +533,10 @@ def main(argv: list[str] | None = None) -> int:
             snmp_allowed_targets=snmp_allowed_targets,
             windows_exporter_allowed_hosts=windows_exporter_allowed_hosts,
             windows_allowed_targets=windows_allowed_targets,
+            max_preflights=args.max_preflights,
+            preflight_allowed_targets=preflight_allowed_targets,
+            preflight_timeout_seconds=args.preflight_timeout_seconds,
+            preflight_snmp_exporter_url=args.preflight_snmp_exporter_url,
         )
         if args.once:
             return 0

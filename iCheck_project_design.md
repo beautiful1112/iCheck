@@ -1737,6 +1737,25 @@ Reports
 
 The AI should find the data.
 
+Implementation status on 2026-09-18: `Assets → Devices` is implemented as a
+dedicated drill-down and onboarding route at `/assets/devices`. It supports
+device identity, site and labels, protocol-neutral connection intents, and
+scoped external credential references. It is intentionally separate from the
+AI Operations home. Connection creation produces `pending` verification state.
+Authenticated site workers now claim leased preflight jobs and return bounded
+evidence for ICMP, TCP transport, or SNMP Exporter protocol queries; the Assets
+page exposes the latest result and audited retry. Verified connections can now
+be rendered through versioned, published activation policies into deterministic
+collector-deployment plans. The Assets page exposes the plan and warnings; an
+operator must approve its hash and reason before atomic activation, and can
+later deactivate it without deleting history. This state is
+`monitoring_configured`, not `active`. Runtime reconciliation now promotes only
+fresh successful scheduled collection to `active`, degrades failed or stale
+collection, fingerprints approved deployment content, detects drift, and
+requires a new exact-plan approval to repair it. Live lab and scale acceptance
+remain open, so neither transport verification nor saved configuration alone is
+presented as proof of continuous monitoring.
+
 ---
 
 # 33. Credential and Security Model
@@ -1823,13 +1842,19 @@ reference; a credential broker resolves it only at execution time. The settings
 page must support a redacted connection test and must prevent secrets from
 entering prompts, traces, tool outputs, or logs.
 
-Implementation status on 2026-09-18: `AIProvider`, `AIModel`, and bounded
-`ModelRoutingPolicy` foundations are implemented with an OpenAI-compatible
-adapter, outbound host allowlist, environment secret-reference resolver,
-redacted model-list connection test, audit records, migration, API, and a
-dedicated settings page. `AgentProfile`, external Vault/KMS providers,
-data-residency policy enforcement, inference, and LangGraph execution remain
-future work. This is configuration infrastructure, not a completed AI operator.
+Implementation status on 2026-09-19: `AIProvider`, `AIModel`, and bounded
+`ModelRoutingPolicy` foundations are implemented with outbound host allowlists,
+environment secret references, redacted model-list tests, audit, API, and a
+dedicated settings page. The first OpenAI-compatible inference adapter and
+bounded LangGraph investigation kernel are also implemented: structured model
+decisions, typed read-only tools, immutable product checkpoints, evidence and
+tool-call persistence, budget/duplicate guards, and deterministic escalation.
+`AgentProfile`, external Vault/KMS providers, data-residency and permission
+policy, live-provider fallback acceptance, live PostgreSQL resume acceptance,
+and governed action approval remain future work. Ordered, snapshotted, audited
+model fallback, durable asynchronous execution, and the initial AI operator
+workspace are implemented. This is a working kernel and first product surface,
+not a completed AI operator product.
 
 ---
 
@@ -2142,6 +2167,44 @@ database, or vendor specialists only when evidence shows that separate context,
 permissions, or tools are necessary. Specialized agents are subgraphs or tools
 under the supervisor, not independent opaque control planes.
 
+## 38.4 Current Kernel Contract
+
+Implementation status on 2026-09-19:
+
+- LangGraph owns the executable reason → tools → reason state machine and may
+  use its PostgreSQL saver for thread-level restart recovery.
+- iCheck separately persists immutable, hash-addressed product checkpoints,
+  evidence references, tool calls, conclusions, confidence, uncertainty, and
+  escalation. LangGraph storage is not exposed as the product audit model.
+- The OpenAI-compatible reasoner reads only the configured provider, model, and
+  server-side credential reference. Provider tokens, infrastructure credential
+  references, and device connection configuration are excluded from prompts.
+- Each investigation snapshots its authenticated principal, permissions, and
+  authorization scope. The model receives only currently executable internal
+  tools allowed by that immutable snapshot. Persistence and execution enforce
+  the permission again; tool results remain untrusted evidence.
+- Core low-latency tools remain typed internal handlers. MCP execution is
+  intentionally fail-closed until the gateway, identity, permission, and
+  capability-pack policies exist.
+- A state-changing tool creates an exact-plan proposal and durably interrupts
+  the same LangGraph thread before execution. A different principal with
+  `changes.approve` must decide the matching plan hash. The existing execution
+  is requeued and resumes the same checkpoint; an ambiguous `executing` action
+  after worker loss is never automatically replayed.
+
+The direct graph service entry point runs only a fresh investigation and rejects
+partially consumed state. The leased agent worker chooses fresh execution or
+resumes the existing LangGraph thread, renews ownership per node, observes
+cancellation, emits ordered/SSE progress, and reconciles a terminal graph commit
+after worker loss. The AI L1 home creates these durable investigations and shows
+their trace, evidence, conclusion, confidence, uncertainty, and real collection
+gaps without moving terminal inventory onto home. Controlled tests cover graph
+reconstruction and resume with an in-memory saver; frontend lint and production
+build cover the workspace. Live PostgreSQL process-kill acceptance, browser
+OIDC/session integration, and per-target scope enforcement remain next. The detailed contracts and
+verified boundaries are maintained in `docs/agent-runtime.md` and
+`docs/operator-workspace.md`.
+
 ---
 
 # 39. Typical Investigation Example
@@ -2230,6 +2293,13 @@ credential-reference profiles and a fail-closed broker boundary
 bounded JSON Schema validation and collector lifecycle audit events
 Prometheus-compatible backend registry and bounded PromQL query boundary
 versioned SNMP Exporter collector pack and non-container deployment templates
+web device onboarding with protocol-neutral, credential-referenced connection intents
+leased worker preflight, bounded evidence, retry, and readiness aggregation
+versioned activation policies, immutable plan preview, approval, and deactivation
+run-health promotion, failure/staleness degradation, and deployment-drift repair
+provider/model routing and secret-reference configuration
+persistent investigation, evidence, Tool Registry, and tool-call contracts
+bounded LangGraph reason/tool/evidence kernel with structured model inference
 ```
 
 This phase proves durable identity and alert state but is not yet the AI-native

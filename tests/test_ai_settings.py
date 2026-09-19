@@ -195,3 +195,38 @@ def test_ai_provider_health_fails_closed_when_secret_is_missing(client):
     assert health.status_code == 200, health.text
     assert health.json()["status"] == "unhealthy"
     assert health.json()["error"] == "Referenced environment secret is unavailable"
+
+
+def test_ai_route_rejects_model_without_reasoning_capabilities(client):
+    provider = client.post(
+        "/api/v1/ai/providers",
+        json={
+            "name": "incompatible-route-provider",
+            "provider_type": "openai_compatible",
+            "base_url": "https://models.example.test/v1",
+            "auth_type": "none",
+            "created_by": "platform.admin",
+        },
+    )
+    assert provider.status_code == 201, provider.text
+    model = client.post(
+        "/api/v1/ai/models",
+        json={
+            "provider_id": provider.json()["id"],
+            "display_name": "Embedding-only model",
+            "model_name": "embedding-only",
+            "capabilities": ["embeddings"],
+            "created_by": "platform.admin",
+        },
+    )
+    assert model.status_code == 201, model.text
+    route = client.post(
+        "/api/v1/ai/routes",
+        json={
+            "purpose": "investigation",
+            "primary_model_id": model.json()["id"],
+            "created_by": "platform.admin",
+        },
+    )
+    assert route.status_code == 422, route.text
+    assert "requires chat and json_schema capabilities" in route.text

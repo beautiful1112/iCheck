@@ -14,6 +14,8 @@ dependencies = [
   "sqlalchemy>=2.0,<3",
   "alembic>=1.15,<2",
   "jsonschema>=4.23,<5",
+  "langgraph>=1,<2",
+  "langgraph-checkpoint-postgres>=3,<4",
   "prometheus-client>=0.22,<1",
   "psycopg[binary]>=3.2,<4",
   "uvicorn[standard]>=0.34,<1",
@@ -21,6 +23,7 @@ dependencies = [
 
 [project.scripts]
 icheck-collector = "icheck.collector_worker:main"
+icheck-agent-worker = "icheck.agent_worker:main"
 
 [project.optional-dependencies]
 dev = [

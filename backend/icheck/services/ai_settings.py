@@ -251,9 +251,22 @@ def create_ai_model_route(
     db: Session,
     payload: AIModelRouteCreate,
 ) -> AIModelRoute:
-    _model(db, payload.primary_model_id)
-    for model_id in payload.fallback_model_ids:
+    models = [
         _model(db, model_id)
+        for model_id in [payload.primary_model_id, *payload.fallback_model_ids]
+    ]
+    for model in models:
+        if not model.enabled:
+            raise ValueError(f"AI model {model.id!r} is disabled")
+        provider = db.get(AIProviderConfig, model.provider_id)
+        if provider is None or not provider.enabled:
+            raise ValueError(
+                f"AI model {model.id!r} does not have an enabled provider"
+            )
+        if not {"chat", "json_schema"} <= set(model.capabilities):
+            raise ValueError(
+                f"AI model {model.id!r} requires chat and json_schema capabilities"
+            )
     route = AIModelRoute(**payload.model_dump())
     db.add(route)
     try:

@@ -240,6 +240,8 @@ POST /api/v1/collector-workers/{worker_id}/leases/claim
 POST /api/v1/collector-runs/{run_id}/lease
 POST /api/v1/collector-runs/{run_id}/envelopes
 POST /api/v1/collector-runs/{run_id}/complete
+POST /api/v1/collector-workers/{worker_id}/device-preflights/claim
+POST /api/v1/collector-workers/{worker_id}/device-preflights/{preflight_id}/complete
 GET  /api/v1/collector-runs
 GET  /api/v1/collectors/health
 ```
@@ -260,6 +262,20 @@ deployment is reassigned, the previous running attempt is cancelled.
 
 mTLS/certificate identity remains a production gate in addition to these
 application-layer credentials.
+
+Device preflights use the same worker identity plus a separate expiring lease.
+Claims match worker site labels and advertised adapter capabilities. Successful
+and failed attempts retain bounded, secret-checked evidence; a failed attempt is
+not automatically retried. The operator uses the Assets retry API with an
+audited reason. Device list/detail responses expose only the latest summary;
+history is fetched with a bounded limit.
+
+The reference worker requires
+`ICHECK_COLLECTOR_PREFLIGHT_ALLOWED_TARGETS`. It performs ICMP echo for `icmp`,
+TCP transport checks for HTTP/SSH/Windows adapters, and a bounded site-local
+SNMP Exporter query for `snmp_exporter`. TCP success explicitly states that
+authentication was not tested. SNMP additionally enforces exporter and target
+allowlists and fails if no exporter URL is configured.
 
 Lifecycle history is queryable with `GET /api/v1/audit-events`, optionally
 filtered by event type, entity type, or entity ID. Tokens and secret references

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 
-from .models import CollectorWorker
+from .models import AgentWorker, CollectorWorker
 
 
 class WorkerAuthenticationError(ValueError):
@@ -28,3 +28,14 @@ def authenticate_worker(
         raise WorkerAuthenticationError("Collector worker bearer token is required")
     if not secrets.compare_digest(worker.auth_token_hash, hash_token(token)):
         raise WorkerAuthenticationError("Invalid collector worker token")
+
+
+def authenticate_agent_worker(
+    worker: AgentWorker,
+    authorization: str | None,
+) -> None:
+    scheme, _, token = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise WorkerAuthenticationError("Agent worker bearer token is required")
+    if not secrets.compare_digest(worker.auth_token_hash, hash_token(token)):
+        raise WorkerAuthenticationError("Invalid agent worker token")

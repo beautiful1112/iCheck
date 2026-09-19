@@ -129,6 +129,7 @@ export default function AISettingsPage() {
   const [modelCapabilities, setModelCapabilities] = useState("chat,tools,json_schema");
   const [routePurpose, setRoutePurpose] = useState("investigation");
   const [routeModelId, setRouteModelId] = useState("");
+  const [routeFallbackIds, setRouteFallbackIds] = useState<string[]>([]);
   const [maxIterations, setMaxIterations] = useState("8");
   const [maxToolCalls, setMaxToolCalls] = useState("20");
   const [timeoutSeconds, setTimeoutSeconds] = useState("300");
@@ -294,7 +295,7 @@ export default function AISettingsPage() {
         body: JSON.stringify({
           purpose: routePurpose,
           primary_model_id: routeModelId,
-          fallback_model_ids: [],
+          fallback_model_ids: routeFallbackIds,
           max_iterations: Number(maxIterations),
           max_tool_calls: Number(maxToolCalls),
           timeout_seconds: Number(timeoutSeconds),
@@ -302,6 +303,7 @@ export default function AISettingsPage() {
           created_by: "platform.admin",
         }),
       });
+      setRouteFallbackIds([]);
       setMessage({ tone: "success", text: "Model route created." });
       await load();
     } catch (error) {
@@ -657,7 +659,13 @@ export default function AISettingsPage() {
                   <select
                     className={selectClass}
                     value={routeModelId}
-                    onChange={(event) => setRouteModelId(event.target.value)}
+                    onChange={(event) => {
+                      const modelId = event.target.value;
+                      setRouteModelId(modelId);
+                      setRouteFallbackIds((current) =>
+                        current.filter((item) => item !== modelId),
+                      );
+                    }}
                     required
                   >
                     <option value="">Select a model</option>
@@ -668,6 +676,63 @@ export default function AISettingsPage() {
                     ))}
                   </select>
                 </label>
+                <div className="sm:col-span-2">
+                  <FieldLabel>Fallback models, in selection order</FieldLabel>
+                  <div className="grid gap-2 rounded-md border border-[#d8dbe0] bg-[#f8f9fa] p-3 sm:grid-cols-2">
+                    {models
+                      .filter((model) => model.id !== routeModelId)
+                      .map((model) => {
+                        const selected = routeFallbackIds.includes(model.id);
+                        return (
+                          <label
+                            key={model.id}
+                            className={cn(
+                              "flex cursor-pointer items-center gap-2 rounded-md border bg-white px-3 py-2 text-xs",
+                              selected
+                                ? "border-[#5856d6] text-[#3c3a9f]"
+                                : "border-[#e4e6e9] text-[#5c6873]",
+                            )}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selected}
+                              onChange={(event) =>
+                                setRouteFallbackIds((current) =>
+                                  event.target.checked
+                                    ? [...current, model.id]
+                                    : current.filter((item) => item !== model.id),
+                                )
+                              }
+                              className="accent-[#5856d6]"
+                            />
+                            <span className="min-w-0 truncate">{model.display_name}</span>
+                          </label>
+                        );
+                      })}
+                    {models.length <= 1 ? (
+                      <p className="text-xs text-[#8a93a2]">
+                        Register another compatible model to configure fallback.
+                      </p>
+                    ) : null}
+                  </div>
+                  {routeFallbackIds.length ? (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {routeFallbackIds.map((modelId, index) => (
+                        <Badge
+                          key={modelId}
+                          variant="outline"
+                          className="border-[#c9c8ef] bg-[#f4f3ff] text-[10px] text-[#3c3a9f]"
+                        >
+                          {index + 1}. {modelNames.get(modelId) || "Unknown model"}
+                        </Badge>
+                      ))}
+                    </div>
+                  ) : null}
+                  <p className="mt-2 text-[11px] leading-5 text-[#8a93a2]">
+                    Fallback is attempted only after an audited retryable model or
+                    provider failure and remains inside the investigation deadline.
+                  </p>
+                </div>
                 <label>
                   <FieldLabel>Max iterations</FieldLabel>
                   <Input
@@ -826,6 +891,13 @@ export default function AISettingsPage() {
                     <p className="mt-2 text-xs text-[#768192]">
                       {modelNames.get(route.primary_model_id) || "Unknown model"}
                     </p>
+                    {route.fallback_model_ids.length ? (
+                      <p className="mt-1 text-[11px] leading-5 text-[#8a93a2]">
+                        Fallback: {route.fallback_model_ids
+                          .map((modelId) => modelNames.get(modelId) || "Unknown model")
+                          .join(" → ")}
+                      </p>
+                    ) : null}
                     <p className="mt-2 text-[11px] leading-5 text-[#8a93a2]">
                       {route.max_iterations} iterations · {route.max_tool_calls} tools ·{" "}
                       {route.timeout_seconds}s · {route.token_budget.toLocaleString()} tokens

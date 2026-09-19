@@ -1,0 +1,22 @@
+[Unit]
+Description=iCheck AI investigation worker
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=icheck
+Group=icheck
+WorkingDirectory=/opt/icheck
+EnvironmentFile=/etc/icheck/agent-worker.env
+ExecStart=/opt/icheck/.venv/bin/icheck-agent-worker
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/icheck
+
+[Install]
+WantedBy=multi-user.target

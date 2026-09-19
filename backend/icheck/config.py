@@ -1,5 +1,7 @@
 from functools import lru_cache
+from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,8 +18,27 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
     auto_create_schema: bool = True
     collector_registration_token: str | None = None
+    agent_registration_token: str | None = None
     metrics_allowed_hosts: str = ""
     ai_allowed_hosts: str = ""
+    control_plane_auth_mode: Literal["disabled", "required"] = "disabled"
+    control_plane_bootstrap_token: str | None = None
+    control_plane_default_token_ttl_hours: int = 720
+
+    @model_validator(mode="after")
+    def validate_security_mode(self) -> "Settings":
+        if not 1 <= self.control_plane_default_token_ttl_hours <= 8760:
+            raise ValueError(
+                "control_plane_default_token_ttl_hours must be between 1 and 8760"
+            )
+        if (
+            self.environment.strip().lower() == "production"
+            and self.control_plane_auth_mode != "required"
+        ):
+            raise ValueError(
+                "production requires ICHECK_CONTROL_PLANE_AUTH_MODE=required"
+            )
+        return self
 
     @property
     def cors_origin_list(self) -> list[str]:
