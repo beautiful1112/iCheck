@@ -174,6 +174,28 @@ def test_public_runtime_permissions_survive_private_installer_umask(tmp_path):
     assert outside.stat().st_mode & 0o777 == 0o600
 
 
+def test_provisioning_preserves_service_group_traversal_without_exposing_private_files(tmp_path):
+    previous = os.umask(0o077)
+    try:
+        installer.provisioning_umask()
+        directory = tmp_path / 'service-config'
+        directory.mkdir(mode=0o750)
+        descriptor = os.open(directory / 'private', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(descriptor)
+        assert directory.stat().st_mode & 0o777 == 0o750
+        assert (directory / 'private').stat().st_mode & 0o777 == 0o600
+    finally:
+        os.umask(previous)
+
+
+def test_finish_selects_provisioning_umask_before_loading_helpers(tmp_path):
+    with patch.object(installer, 'provisioning_umask') as mask, \
+         patch.object(installer, 'load', side_effect=installer.InstallError('fixture stop')):
+        with pytest.raises(installer.InstallError, match='fixture stop'):
+            installer.finish(tmp_path, {})
+    mask.assert_called_once_with()
+
+
 @pytest.mark.parametrize('name', ['/etc/passwd', '../escape', builder.APP_ROOT + '/../escape', 'other/file'])
 def test_builder_rejects_unexpected_members(name):
     assert not builder.valid_member(tarfile.TarInfo(name))

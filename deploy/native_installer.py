@@ -418,7 +418,15 @@ def service_account(name):
         return pwd.getpwnam(name)
 
 
+def provisioning_umask():
+    # Helpers intentionally create 0750 service-group directories. The outer
+    # archive launcher uses 0077; carrying it into provisioning strips traversal
+    # from those groups. Private files still explicitly request 0600/0700.
+    os.umask(0o027)
+
+
 def finish(payload, config):
+    provisioning_umask()
     import yaml
     from icheck.monitoring_gateway import GatewayConfig
     bundle = payload / APP
