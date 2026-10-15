@@ -37,5 +37,6 @@ fleet scalability, universal device support or unattended remediation.
   is supplied. Preserve administrative recovery and custody securely.
 - Release checksums are integrity checks, not cryptographic publisher signatures.
 
-See [release qualification](../acceptance/public-preview-qualification.json) and
-[installation](engineering-preview-installation.md) before deploying.
+See [native installer acceptance](../acceptance/native-installer-r19-27.json),
+[application publication checks](../acceptance/public-preview-qualification.json)
+and [installation](native-one-command-installer.md) before deploying.

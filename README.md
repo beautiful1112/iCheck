@@ -65,7 +65,8 @@ web sign-in. Grafana credentials are separate unless shared identity is configur
 - [Monitoring](docs/continuous-monitoring.md), [Grafana](docs/grafana-monitoring-design.md) and [alerting](docs/metric-alerts.md)
 - [Limitations](docs/engineering-preview-known-limitations.md) and [remaining work](docs/development-plan.md)
 - [Architecture](docs/mvp-architecture.md) and [design history](iCheck_project_design.md)
-- [Release qualification](acceptance/public-preview-qualification.json)
+- [Native installer acceptance](acceptance/native-installer-r19-27.json)
+- [Application publication checks (r19.26)](acceptance/public-preview-qualification.json)
 
 All documentation is English. Historical design notes describe development
 decisions, not configuration shipped to new installations.
