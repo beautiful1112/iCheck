@@ -1,0 +1,32 @@
+{
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
+  "region_id": "00000000-0000-0000-0000-000000000002",
+  "api_base_url": "http://127.0.0.1:8000",
+  "allow_loopback_api_http": true,
+  "api_token_file": "/etc/icheck-workers/monitoring-gateway/api-token",
+  "prometheus_token_file": "/etc/icheck-workers/monitoring-gateway/prometheus-token",
+  "listen_address": "127.0.0.1",
+  "port": 9120,
+  "profiles": {
+    "lab-network": {
+      "protocol": "snmp",
+      "sites": ["LAB"],
+      "allowed_targets": ["198.18.0.0/15"],
+      "allowed_ports": [161],
+      "credential_profile_ids": ["REPLACE_WITH_APPROVED_PROFILE_ID"],
+      "allowed_modules": ["if_mib"],
+      "snmp_exporter_url": "http://127.0.0.1:9116/snmp",
+      "snmp_auth_name": "lab_v3"
+    },
+    "lab-windows": {
+      "protocol": "windows_exporter",
+      "sites": ["LAB"],
+      "allowed_targets": ["198.18.0.0/15"],
+      "allowed_ports": [9182],
+      "credential_profile_ids": [null],
+      "allowed_collectors": ["cpu", "memory", "logical_disk", "net", "os", "service", "system"],
+      "windows_scheme": "https",
+      "exporter_tls": {"ca_file": "/etc/icheck-workers/monitoring-gateway/windows-ca.pem"}
+    }
+  }
+}

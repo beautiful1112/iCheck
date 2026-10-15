@@ -130,6 +130,159 @@ def snmp_exporter_artifact_payload() -> dict[str, Any]:
     }
 
 
+def snmp_topology_artifact_payload() -> dict[str, Any]:
+    metric_name = {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_.-]+$",
+    }
+    return {
+        "name": "builtin-snmp-device-adjacency",
+        "kind": "collector",
+        "description": (
+            "Bounded LLDP/CDP adjacency snapshots through a site-local "
+            "Prometheus SNMP Exporter."
+        ),
+        "owner": "icheck",
+        "labels": {
+            "builtin": True,
+            "protocol": "snmp",
+            "domain": "topology",
+            "metrics_format": "prometheus",
+        },
+        "initial_version": {
+            "definition": {
+                "purpose": (
+                    "Convert reviewed LLDP or CDP neighbor info metrics into "
+                    "governed device adjacency snapshots."
+                ),
+                "input_contract": (
+                    "The configured SNMP Exporter module must expose one "
+                    "normalized info metric per physical neighbor link."
+                ),
+            },
+            "implementation": {
+                "runtime": "builtin",
+                "adapter": "snmp_topology",
+            },
+            "tests": [
+                {
+                    "name": "normalized LLDP neighbor",
+                    "fixture": (
+                        'icheck_lldp_neighbor_info{local_port="Gi0/1",'
+                        'remote_chassis_id="00:11:22:33:44:55",'
+                        'remote_system_name="access-01",'
+                        'remote_port="Gi0/48"} 1'
+                    ),
+                }
+            ],
+            "created_by": "system.bootstrap",
+            "collector_definition": {
+                "adapter_type": "snmp_topology",
+                "mode": "poll",
+                "output_kinds": ["relationship"],
+                "credential_profile_ref": None,
+                "target_schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["exporter_url", "target"],
+                    "properties": {
+                        "exporter_url": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2048,
+                        },
+                        "target": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 512,
+                        },
+                        "local_device_key": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 512,
+                        },
+                        "local_display_name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 255,
+                        },
+                    },
+                },
+                "config_schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "protocol": {
+                            "type": "string",
+                            "enum": ["lldp", "cdp"],
+                        },
+                        "modules": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 8,
+                            "items": metric_name,
+                        },
+                        "auth_module": metric_name,
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 120,
+                        },
+                        "max_response_bytes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 50_000_000,
+                        },
+                        "neighbor_metric": metric_name,
+                        "scrape_health_metric": metric_name,
+                        "local_port_label": metric_name,
+                        "remote_device_key_labels": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 8,
+                            "uniqueItems": True,
+                            "items": metric_name,
+                        },
+                        "remote_system_name_label": metric_name,
+                        "remote_port_label": metric_name,
+                        "remote_management_ip_label": metric_name,
+                        "complete_snapshot": {"type": "boolean"},
+                        "max_neighbors": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 2000,
+                        },
+                        "source": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 255,
+                        },
+                    },
+                },
+                "defaults": {
+                    "protocol": "lldp",
+                    "modules": ["icheck_lldp"],
+                    "auth_module": "public_v2",
+                    "timeout_seconds": 15,
+                    "max_response_bytes": 10_000_000,
+                    "neighbor_metric": "icheck_lldp_neighbor_info",
+                    "scrape_health_metric": "snmp_scrape_walk_duration_seconds",
+                    "local_port_label": "local_port",
+                    "remote_device_key_labels": [
+                        "remote_chassis_id",
+                        "remote_system_name",
+                    ],
+                    "remote_system_name_label": "remote_system_name",
+                    "remote_port_label": "remote_port",
+                    "remote_management_ip_label": "remote_management_ip",
+                    "complete_snapshot": True,
+                    "max_neighbors": 1000,
+                },
+            },
+        },
+    }
+
+
 def windows_exporter_artifact_payload() -> dict[str, Any]:
     return {
         "name": "builtin-windows-exporter",
@@ -378,6 +531,10 @@ def _ensure_builtin_artifact(
 
 def ensure_snmp_exporter_artifact(db: Session) -> Artifact:
     return _ensure_builtin_artifact(db, snmp_exporter_artifact_payload())
+
+
+def ensure_snmp_topology_artifact(db: Session) -> Artifact:
+    return _ensure_builtin_artifact(db, snmp_topology_artifact_payload())
 
 
 def ensure_windows_exporter_artifact(db: Session) -> Artifact:

@@ -13,26 +13,70 @@ dependencies = [
   "pydantic-settings>=2.8,<3",
   "sqlalchemy>=2.0,<3",
   "alembic>=1.15,<2",
+  "asyncssh>=2.20,<3",
+  "cryptography>=44,<46",
   "jsonschema>=4.23,<5",
+  "joserfc>=1.7,<2",
   "langgraph>=1,<2",
   "langgraph-checkpoint-postgres>=3,<4",
   "prometheus-client>=0.22,<1",
+  "promql-parser==0.10.0",
   "psycopg[binary]>=3.2,<4",
+  "PyYAML>=6,<7",
+  "reportlab>=5.0.1,<6",
   "uvicorn[standard]>=0.34,<1",
 ]
 
 [project.scripts]
+icheck-db = "icheck.database_release:main"
 icheck-collector = "icheck.collector_worker:main"
+icheck-collector-lease-reconciler = "icheck.collector_lease_reconciler:main"
 icheck-agent-worker = "icheck.agent_worker:main"
+icheck-workflow-dispatch-worker = "icheck.workflow_dispatch_worker:main"
+icheck-projection-worker = "icheck.projection_worker:main"
+icheck-indicator-worker = "icheck.indicator_worker:main"
+icheck-scale-test = "icheck.scale_test:main"
+icheck-checkpoint-recovery-test = "icheck.checkpoint_recovery_test:main"
+icheck-checkpoint-schema-prepare = "icheck.checkpoint_schema:main"
+icheck-checkpoint-orphan-audit = "icheck.checkpoint_schema:audit_main"
+icheck-agent-worker-recovery-test = "icheck.agent_worker_recovery_test:main"
+icheck-agent-worker-cancellation-test = "icheck.agent_worker_cancellation_test:main"
+icheck-agent-worker-completion-loss-test = "icheck.agent_worker_completion_loss_test:main"
+icheck-projection-worker-recovery-test = "icheck.projection_worker_recovery_test:main"
+icheck-collector-worker-recovery-test = "icheck.collector_worker_recovery_test:main"
+icheck-ecosystem-transport-worker = "icheck.ecosystem_transport_worker:main"
+icheck-monitoring-gateway = "icheck.monitoring_gateway:main"
+icheck-scaling-worker = "icheck.scaling_worker:main"
+icheck-quality-worker = "icheck.quality_worker:main"
+icheck-systemd-capacity-provider = "icheck.systemd_capacity_provider:main"
+icheck-rollout-worker = "icheck.rollout_worker:main"
+icheck-ansible-adapter = "icheck.action_adapters.ansible_runner_mcp:main"
+icheck-snmp-attestor = "icheck.snmp_attestor:main"
+icheck-mcp-attestor = "icheck.mcp_attestor_worker:main"
 
 [project.optional-dependencies]
+extensions = [
+  "netmiko==4.8.0",
+  "paramiko==5.0.0",
+]
+action = [
+  "ansible-runner>=2.4,<3",
+]
+windows = [
+  "pypsrp>=0.9.1,<1",
+]
 dev = [
   "httpx>=0.28,<1",
   "pytest>=8.3,<9",
+  "pypdf>=6,<8",
 ]
 
 [tool.setuptools.packages.find]
 where = ["backend"]
+
+[tool.setuptools.package-data]
+icheck = ["assets/report_fonts/*.ttf", "assets/report_fonts/*.txt"]
+migrations = ["script.py.mako"]
 
 [tool.pytest.ini_options]
 pythonpath = ["backend"]

@@ -1,0 +1,36 @@
+{
+  "format_version": "icheck.public-preview-qualification/v1",
+  "release": "0.1.0-preview.r19.26",
+  "scope": "Sanitized distribution based on r19.26; no operator database, credentials or test enrollment",
+  "private_runtime_state_included": false,
+  "publication_checks": {
+    "focused_backend_and_deployment_tests_passed": 202,
+    "environment_dependent_tests_skipped": 2,
+    "frontend_tests_passed": 187,
+    "native_frontend_production_build": "passed",
+    "source_and_artifact_secret_audit": "passed before upload",
+    "existing_history_commits_scanned": 2,
+    "tracked_publication_policy": "passed; no runtime-state paths or CJK text",
+    "live_distinctive_credential_values_checked_in_memory": 14,
+    "live_short_credential_literal_contexts_checked": 3,
+    "live_credential_matches": 0,
+    "gitleaks_version": "8.30.1",
+    "scanner_exceptions": [
+      "Two annotated synthetic curl rejection-test lines",
+      "Newly generated Next.js preview signing/encryption fields and empty-server-actions manifest key; no operator/provider credentials"
+    ]
+  },
+  "qualification": {
+    "live_lab_acceptance": "pending",
+    "clean_host_installation": "pending",
+    "paid_provider_qualification": "not performed"
+  },
+  "changes_from_deployed_r19_26": [
+    "English-only provider labels and documentation",
+    "Private receipts and host-specific maintenance scripts excluded",
+    "Monitoring profile provisioning requires explicitly supplied CIDRs",
+    "First-admin bootstrap defaults to username admin; password is chosen during setup"
+  ],
+  "production_ready": false,
+  "cryptographic_release_signature": false
+}

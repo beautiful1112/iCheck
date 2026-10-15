@@ -3,7 +3,7 @@ import json
 from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy import select
 
-from icheck.builtin_agent_tools import ensure_builtin_agent_tools
+from icheck.builtin_agent_tools import BUILTIN_AGENT_TOOLS, ensure_builtin_agent_tools
 from icheck.database import SessionLocal
 from icheck.langgraph_runtime import GraphDecision, GraphToolRequest
 from icheck.models import (
@@ -53,12 +53,11 @@ class FakeChatOpener:
         assert payload["stream"] is False
         assert payload["response_format"]["type"] == "json_schema"
         assert payload["response_format"]["json_schema"]["strict"] is False
-        assert {item["name"] for item in prompt["available_tools"]} == {
-            "alerts.list_open",
-            "inventory.get_device",
-            "inventory.get_endpoint_history",
-            "metrics.query_instant",
-        }
+        names = [item["name"] for item in prompt["available_tools"]]
+        # This journey needs inventory; unrelated plugins may extend the registry.
+        assert "inventory.get_device" in names
+        assert len(names) == len(set(names))
+        assert all(item["input_schema"].get("type") == "object" for item in prompt["available_tools"])
         self.requests.append(prompt)
 
         if len(self.requests) == 1:
@@ -220,7 +219,7 @@ def test_database_graph_executes_builtin_tool_and_persists_evidence(client):
         assert [tool.id for tool in first_seed] == [
             tool.id for tool in second_seed
         ]
-        assert len(db.scalars(select(AgentToolRegistration)).all()) == 4
+        assert len(db.scalars(select(AgentToolRegistration)).all()) == len(BUILTIN_AGENT_TOOLS)
 
         investigation = db.get(Investigation, investigation_id)
         assert investigation is not None
@@ -239,7 +238,7 @@ def test_database_graph_executes_builtin_tool_and_persists_evidence(client):
             checkpointer=saver,
             interrupt_after=["tools"],
         )
-        assert interrupted["status"] == "running"
+        assert interrupted["status"] == "running", interrupted.get("escalation_reason")
         assert interrupted["current_node"] == "tools"
         assert interrupted["tool_calls_used"] == 1
         assert len(opener.requests) == 1

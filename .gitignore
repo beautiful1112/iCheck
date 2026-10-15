@@ -1,4 +1,7 @@
 .env
+.env.*
+!.env.example
+!**/*.env.example
 .venv/
 __pycache__/
 *.py[cod]
@@ -7,6 +10,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 *.egg-info/
+/build/
 htmlcov/
 frontend/node_modules/
 frontend/.next/
@@ -14,4 +18,31 @@ frontend/dist/
 frontend/.vinext/
 frontend/.wrangler/
 frontend/.sites-runtime/
-
+.playwright-cli/
+tmp/pdfs/
+output/pdf/
+output/playwright/
+# Reproducible release/build binaries; retain JSON plans and acceptance evidence.
+*.whl
+frontend/*.tsbuildinfo
+output/releases/*/
+output/releases/*.tar.gz
+output/*-frontend/
+output/*-upgrade-*/frontend/
+output/*-upgrade-*/frontend-responsive/
+output/*-upgrade-*/superseded-package/
+# Private operational state and publication artifacts never belong in Git.
+/output/
+/tmp/
+/deploy/runtime/
+*.dump
+*.sql
+*.sqlite*
+*.pem
+*.key
+*.p12
+*.pfx
+*.tar.gz
+*.zip
+*-login.json
+*-credentials.json

@@ -5,18 +5,29 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=icheck
-Group=icheck
+User=icheck-collector
+Group=icheck-collector
+UMask=0077
 EnvironmentFile=/etc/icheck/collector.env
 WorkingDirectory=/opt/icheck
 ExecStart=/opt/icheck/.venv/bin/icheck-collector
 Restart=on-failure
 RestartSec=5
+KillMode=control-group
+TimeoutStopSec=10s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/icheck
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StateDirectory=icheck-collector
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/icheck-collector
 
 [Install]
 WantedBy=multi-user.target

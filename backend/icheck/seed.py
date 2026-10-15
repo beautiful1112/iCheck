@@ -4,10 +4,11 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 
-from .database import SessionLocal, init_db
+from .database import SessionLocal, init_db, set_session_namespace
 from .builtin_artifacts import (
     ensure_psrp_cim_artifact,
     ensure_snmp_exporter_artifact,
+    ensure_snmp_topology_artifact,
     ensure_windows_exporter_artifact,
 )
 from .builtin_activation_policies import ensure_builtin_activation_policies
@@ -23,19 +24,24 @@ from .schemas import (
 from .services.alerts import ensure_default_rules, upsert_alert
 from .services.control_plane_auth import ensure_builtin_roles
 from .services.inventory import ingest_network_observations, ingest_wireless_snapshot
+from .services.tenancy import ensure_default_namespace
 
 
 def seed() -> None:
     init_db()
     with SessionLocal() as db:
+        tenant, region = ensure_default_namespace(db)
+        set_session_namespace(db, tenant.id, region.id)
         ensure_default_rules(db)
         ensure_builtin_roles(db)
         snmp_artifact = ensure_snmp_exporter_artifact(db)
+        snmp_topology_artifact = ensure_snmp_topology_artifact(db)
         windows_exporter_artifact = ensure_windows_exporter_artifact(db)
         psrp_cim_artifact = ensure_psrp_cim_artifact(db)
         ensure_builtin_activation_policies(
             db,
             snmp_artifact=snmp_artifact,
+            snmp_topology_artifact=snmp_topology_artifact,
             windows_exporter_artifact=windows_exporter_artifact,
             psrp_cim_artifact=psrp_cim_artifact,
         )

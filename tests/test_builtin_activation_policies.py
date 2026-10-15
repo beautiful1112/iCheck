@@ -2,6 +2,7 @@ from icheck.builtin_activation_policies import ensure_builtin_activation_policie
 from icheck.builtin_artifacts import (
     ensure_psrp_cim_artifact,
     ensure_snmp_exporter_artifact,
+    ensure_snmp_topology_artifact,
     ensure_windows_exporter_artifact,
 )
 from icheck.database import SessionLocal
@@ -12,6 +13,7 @@ def _ensure_defaults():
         return ensure_builtin_activation_policies(
             db,
             snmp_artifact=ensure_snmp_exporter_artifact(db),
+            snmp_topology_artifact=ensure_snmp_topology_artifact(db),
             windows_exporter_artifact=ensure_windows_exporter_artifact(db),
             psrp_cim_artifact=ensure_psrp_cim_artifact(db),
         )
@@ -35,10 +37,19 @@ def test_builtin_activation_policies_are_published_and_idempotent(client):
     )
     assert response.status_code == 200, response.text
     policies = response.json()
-    assert len(policies) == 3
-    snmp = next(policy for policy in policies if policy["protocol"] == "snmp")
+    assert len(policies) == 4
+    snmp = next(
+        policy for policy in policies if policy["name"] == "builtin-snmp-site-local"
+    )
     assert snmp["target_template"] == {
         "exporter_url": "http://127.0.0.1:9116",
         "target": "${management_ip}",
     }
     assert snmp["worker_selector"] == {"site": "${site}"}
+    topology = next(
+        policy
+        for policy in policies
+        if policy["name"] == "builtin-snmp-device-adjacency"
+    )
+    assert topology["adapter_type"] == "snmp_topology"
+    assert topology["target_template"]["local_device_key"] == "${device_id}"

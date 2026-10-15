@@ -1,0 +1,35 @@
+[Unit]
+Description=iCheck SNMP Exporter attestation job (%i)
+After=network-online.target icheck-snmp-exporter.service
+Wants=network-online.target
+Requires=icheck-snmp-exporter.service
+
+[Service]
+Type=oneshot
+User=icheck-attestor
+Group=icheck-attestor
+SupplementaryGroups=icheck-snmp-exporter
+UMask=0077
+EnvironmentFile=/etc/icheck/snmp-attestor/%i.env
+ExecStart=/opt/icheck/.venv/bin/icheck-snmp-attestor --proposal-file ${ICHECK_SNMP_ATTESTOR_PROPOSAL_FILE} --mib-file ${ICHECK_SNMP_ATTESTOR_MIB_FILE} --shared-mib-dir ${ICHECK_SNMP_ATTESTOR_SHARED_MIB_DIR} --generator-binary ${ICHECK_SNMP_ATTESTOR_GENERATOR_BINARY} --generator-manifest ${ICHECK_SNMP_ATTESTOR_GENERATOR_MANIFEST} --exporter-binary ${ICHECK_SNMP_ATTESTOR_EXPORTER_BINARY} --installed-config ${ICHECK_SNMP_ATTESTOR_INSTALLED_CONFIG} --exporter-url ${ICHECK_SNMP_ATTESTOR_EXPORTER_URL} --target ${ICHECK_SNMP_ATTESTOR_TARGET} --auth-module ${ICHECK_SNMP_ATTESTOR_AUTH_MODULE} --exporter-allowed-hosts ${ICHECK_SNMP_ATTESTOR_EXPORTER_ALLOWED_HOSTS} --target-allowed-hosts ${ICHECK_SNMP_ATTESTOR_TARGET_ALLOWED_HOSTS} --installation-id ${ICHECK_SNMP_ATTESTOR_INSTALLATION_ID} --private-key-file ${ICHECK_SNMP_ATTESTOR_PRIVATE_KEY_FILE} --expires-hours ${ICHECK_SNMP_ATTESTOR_EXPIRES_HOURS} --scrape-count ${ICHECK_SNMP_ATTESTOR_SCRAPE_COUNT} --output-file ${ICHECK_SNMP_ATTESTOR_OUTPUT_FILE}
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+StateDirectory=icheck-attestor
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/icheck-attestor

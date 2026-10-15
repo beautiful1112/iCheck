@@ -256,7 +256,13 @@ def test_investigation_snapshots_and_executes_ordered_model_fallback(
     completed = next(
         item for item in attempts if item.event_type.endswith("completed")
     )
-    assert failed.details == {
+    details = dict(failed.details)
+    assert 0 <= details.pop("elapsed_seconds") < 30
+    if primary_failure == "invalid_decision":
+        value = details.pop("diagnostic")
+        assert value["code"] == "model_schema_invalid"
+        assert value["validation_errors"][0]["rule"] == "invalid_json"
+    assert details == {
         "model_id": primary_model["id"],
         "provider_id": primary_provider["id"],
         "iteration": 1,

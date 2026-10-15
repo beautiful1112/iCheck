@@ -12,7 +12,7 @@ scrape_configs:
       module: [if_mib]
     file_sd_configs:
       - files:
-          - /etc/icheck/prometheus/snmp-targets.json
+          - /etc/icheck-workers/prometheus/snmp-targets.json
         refresh_interval: 30s
     relabel_configs:
       - source_labels: [snmp_auth]
@@ -43,7 +43,7 @@ scrape_configs:
         - system
     file_sd_configs:
       - files:
-          - /etc/icheck/prometheus/windows-targets.json
+          - /etc/icheck-workers/prometheus/windows-targets.json
         refresh_interval: 30s
 
 # Configure this only when a tested Prometheus-compatible remote store exists.

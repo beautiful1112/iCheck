@@ -166,6 +166,10 @@ def test_investigation_checkpoint_evidence_and_typed_tool_lifecycle(client):
     assert completed.status_code == 200, completed.text
     assert completed.json()["status"] == "succeeded"
     assert len(completed.json()["result_hash"]) == 64
+    listed = client.get(f"/api/v1/agent/investigations/{investigation['id']}/tool-calls")
+    assert listed.status_code == 200
+    assert listed.json()[0]["tool_name"] == tool["name"]
+    assert listed.json()[0]["result"] == completed.json()["result"]
 
     checkpoint = client.post(
         f"/api/v1/agent/investigations/{investigation['id']}/checkpoints",

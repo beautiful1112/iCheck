@@ -1,0 +1,23 @@
+{
+  "format_version": "icheck.systemd-capacity/v1",
+  "policies": [
+    {
+      "pool": "collector",
+      "policy_name": "hkg-network-collectors",
+      "instances": [
+        "hkg-network-01",
+        "hkg-network-02",
+        "hkg-network-03",
+        "hkg-network-04"
+      ]
+    },
+    {
+      "pool": "agent",
+      "policy_name": "hkg-ai-operators",
+      "instances": [
+        "hkg-agent-01",
+        "hkg-agent-02"
+      ]
+    }
+  ]
+}

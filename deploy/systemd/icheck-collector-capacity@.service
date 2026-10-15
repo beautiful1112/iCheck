@@ -1,0 +1,32 @@
+[Unit]
+Description=iCheck managed Collector capacity instance %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=icheck-collector
+Group=icheck-collector
+UMask=0077
+WorkingDirectory=/opt/icheck
+EnvironmentFile=/etc/icheck/capacity/collector-common.env
+EnvironmentFile=-/etc/icheck/capacity/collector-%i.env
+ExecStart=/opt/icheck/.venv/bin/icheck-collector --name capacity-collector-%i
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StateDirectory=icheck-collector
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/icheck-collector
+
+[Install]
+WantedBy=multi-user.target

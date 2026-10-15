@@ -6,16 +6,19 @@ import re
 import secrets
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from ..activation_schemas import (
+    ActivationPolicyDraftUpdate,
     ActivationPlanRead,
     DeviceActivationPolicyCreate,
 )
 from ..collector_schemas import CollectorDeploymentCreate
+from ..database import require_locking_transaction
 from ..models import (
     ArtifactKind,
     ArtifactVersion,
@@ -29,13 +32,15 @@ from ..models import (
     utcnow,
 )
 from ..schema_validation import validate_instance
+from ..sandbox import POTENTIAL_SECRET_LITERAL
 from .audit import record_audit_event
 from .collectors import (
+    SENSITIVE_KEYS,
     assert_no_inline_secrets,
     create_deployment,
     validate_deployment_payload,
 )
-from .devices import PROTOCOL_ADAPTERS
+from .devices import PROTOCOL_ACTIVATION_ADAPTERS
 from .runtime_health import (
     deployment_fingerprint,
     refresh_device_runtime_status,
@@ -51,6 +56,13 @@ ALLOWED_PLACEHOLDERS = {
     "protocol",
     "site",
 }
+
+
+class ActivationPolicyRevisionConflict(RuntimeError):
+    """A draft changed, became immutable, or lost an optimistic update race."""
+SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(?:password|token|api[ _-]?key|community|secret)\s*[:=]\s*\S+"
+)
 
 
 def _canonical_hash(value: Any) -> str:
@@ -98,14 +110,14 @@ def _check_policy_artifact(
     require_published: bool,
 ) -> ArtifactVersion:
     version = _artifact_version(db, artifact_version_id)
-    expected_adapter = PROTOCOL_ADAPTERS[protocol]
+    allowed_adapters = PROTOCOL_ACTIVATION_ADAPTERS[protocol]
     definition = version.collector_definition
     if definition is None:
         raise ValueError("Collector definition is missing")
-    if definition.adapter_type != expected_adapter:
+    if definition.adapter_type not in allowed_adapters:
         raise ValueError(
-            f"Protocol {protocol!r} requires adapter {expected_adapter!r}, "
-            f"not {definition.adapter_type!r}"
+            f"Protocol {protocol!r} requires adapter in "
+            f"{sorted(allowed_adapters)!r}, not {definition.adapter_type!r}"
         )
     if require_published and version.status != ArtifactVersionStatus.PUBLISHED:
         raise ValueError("Activation policies require a published collector version")
@@ -165,6 +177,85 @@ def _template_context(
     }
 
 
+def reject_inline_policy_credentials(
+    policy: DeviceActivationPolicy | DeviceActivationPolicyCreate,
+) -> None:
+    """Keep operator-edited policy templates free of credential literals."""
+    for field in ("target_template", "configuration_defaults", "worker_selector"):
+        value = getattr(policy, field)
+        assert_no_inline_secrets(value, field)
+        document = json.dumps(value, ensure_ascii=False)
+        if POTENTIAL_SECRET_LITERAL.search(document) or SECRET_ASSIGNMENT.search(document):
+            raise ValueError(f"{field} appears to contain an inline credential")
+    if policy.protocol == "https_api":
+        url = policy.target_template.get("url")
+        if isinstance(url, str):
+            parsed = urlsplit(url)
+            if parsed.username or parsed.password:
+                raise ValueError("HTTPS API target cannot embed credentials")
+            if any(
+                key.lower().replace("-", "_") in SENSITIVE_KEYS
+                for key, _ in parse_qsl(parsed.query, keep_blank_values=True)
+            ):
+                raise ValueError("HTTPS API URL cannot contain credential query keys")
+
+
+def validate_activation_policy_templates(
+    db: Session,
+    policy: DeviceActivationPolicy | DeviceActivationPolicyCreate,
+) -> ArtifactVersion:
+    """Run the same pure template/contract checks before preview or publication."""
+    reject_inline_policy_credentials(policy)
+    version = _check_policy_artifact(
+        db,
+        protocol=policy.protocol,
+        artifact_version_id=policy.artifact_version_id,
+        require_published=True,
+    )
+    definition = version.collector_definition
+    if definition is None:
+        raise ValueError("Collector definition is missing")
+    context = _template_context(
+        device_id="00000000-0000-0000-0000-000000000000",
+        device_name="validation-device",
+        management_ip="192.0.2.1",
+        port=443,
+        protocol=policy.protocol,
+        site="VALIDATION",
+    )
+    target = _render_value(policy.target_template, context, "target_template")
+    configuration = _render_value(
+        policy.configuration_defaults, context, "configuration_defaults",
+    )
+    selector = _render_value(policy.worker_selector, context, "worker_selector")
+    if not isinstance(target, dict) or not isinstance(configuration, dict):
+        raise ValueError("Activation policy templates must render to objects")
+    if not isinstance(selector, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in selector.items()
+    ):
+        raise ValueError("worker_selector must render to string key/value pairs")
+    validate_instance(target, definition.target_schema, "activation target template")
+    validate_instance(
+        {**definition.defaults, **configuration},
+        definition.config_schema,
+        "activation configuration template",
+    )
+    if policy.protocol == "https_api":
+        url = target.get("url")
+        parsed = urlsplit(url) if isinstance(url, str) else None
+        if parsed is None or parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError("HTTPS API target must use an HTTPS URL")
+        if parsed.username or parsed.password:
+            raise ValueError("HTTPS API target cannot embed credentials")
+    if (
+        definition.adapter_type == "psrp_cim"
+        and policy.execution_mode != CollectorDeploymentMode.ON_DEMAND
+    ):
+        raise ValueError("psrp_cim activation policies must use on_demand execution")
+    return version
+
+
 def create_activation_policy(
     db: Session,
     payload: DeviceActivationPolicyCreate,
@@ -175,12 +266,7 @@ def create_activation_policy(
         artifact_version_id=payload.artifact_version_id,
         require_published=False,
     )
-    assert_no_inline_secrets(payload.target_template, "target_template")
-    assert_no_inline_secrets(
-        payload.configuration_defaults,
-        "configuration_defaults",
-    )
-    assert_no_inline_secrets(payload.worker_selector, "worker_selector")
+    reject_inline_policy_credentials(payload)
     definition = version.collector_definition
     if definition is None:
         raise ValueError("Collector definition is missing")
@@ -197,6 +283,8 @@ def create_activation_policy(
         execution_mode=payload.execution_mode,
         schedule_seconds=payload.schedule_seconds,
         created_by=payload.created_by,
+        updated_by=payload.created_by,
+        updated_at=utcnow(),
     )
     db.add(policy)
     try:
@@ -223,55 +311,122 @@ def create_activation_policy(
     return policy
 
 
+def update_activation_policy_draft(
+    db: Session,
+    policy_id: str,
+    payload: ActivationPolicyDraftUpdate,
+) -> DeviceActivationPolicy:
+    """Atomically revise only a draft, preserving its version and audit trail."""
+    require_locking_transaction(db, purpose="Activation policy draft edits")
+    policy = db.scalar(
+        select(DeviceActivationPolicy)
+        .where(DeviceActivationPolicy.id == policy_id)
+        .with_for_update()
+    )
+    if policy is None:
+        raise LookupError("Activation policy not found")
+    if policy.status != ArtifactVersionStatus.DRAFT:
+        raise ActivationPolicyRevisionConflict("Only draft activation policies can be edited")
+    if policy.revision != payload.expected_revision:
+        raise ActivationPolicyRevisionConflict("Activation policy draft revision changed")
+    draft = payload.draft
+    if draft.name != policy.name:
+        raise ValueError("A policy name is stable; create a new policy for a rename")
+    version = _check_policy_artifact(
+        db, protocol=draft.protocol,
+        artifact_version_id=draft.artifact_version_id,
+        require_published=False,
+    )
+    reject_inline_policy_credentials(draft)
+    definition = version.collector_definition
+    if definition is None:
+        raise ValueError("Collector definition is missing")
+    old_content = {
+        "protocol": policy.protocol,
+        "adapter_type": policy.adapter_type,
+        "artifact_version_id": policy.artifact_version_id,
+        "target_template": policy.target_template,
+        "configuration_defaults": policy.configuration_defaults,
+        "worker_selector": policy.worker_selector,
+        "execution_mode": policy.execution_mode.value,
+        "schedule_seconds": policy.schedule_seconds,
+    }
+    new_content = {
+        "protocol": draft.protocol,
+        "adapter_type": definition.adapter_type,
+        "artifact_version_id": draft.artifact_version_id,
+        "target_template": draft.target_template,
+        "configuration_defaults": draft.configuration_defaults,
+        "worker_selector": draft.worker_selector,
+        "execution_mode": draft.execution_mode.value,
+        "schedule_seconds": draft.schedule_seconds,
+    }
+    changed_fields = sorted(
+        key for key in old_content if old_content[key] != new_content[key]
+    )
+    if not changed_fields:
+        return policy
+    changed = db.execute(
+        update(DeviceActivationPolicy)
+        .where(
+            DeviceActivationPolicy.id == policy.id,
+            DeviceActivationPolicy.status == ArtifactVersionStatus.DRAFT,
+            DeviceActivationPolicy.revision == payload.expected_revision,
+        )
+        .values(
+            **{key: getattr(draft, key) for key in (
+                "protocol", "artifact_version_id", "target_template",
+                "configuration_defaults", "worker_selector", "execution_mode",
+                "schedule_seconds",
+            )},
+            adapter_type=definition.adapter_type,
+            revision=payload.expected_revision + 1,
+            updated_by=payload.actor,
+            updated_at=utcnow(),
+        )
+        .returning(DeviceActivationPolicy.id)
+    ).scalar_one_or_none()
+    if changed is None:
+        db.rollback()
+        raise ActivationPolicyRevisionConflict("Activation policy draft revision changed")
+    record_audit_event(
+        db,
+        event_type="device.activation_policy.draft_updated",
+        actor_type="user",
+        actor_id=payload.actor,
+        entity_type="device_activation_policy",
+        entity_id=policy.id,
+        details={
+            "revision_before": payload.expected_revision,
+            "revision_after": payload.expected_revision + 1,
+            "changed_fields": changed_fields,
+            "content_sha256_before": _canonical_hash(old_content),
+            "content_sha256_after": _canonical_hash(new_content),
+        },
+    )
+    db.commit()
+    db.refresh(policy)
+    return policy
+
+
 def validate_activation_policy(
     db: Session,
     policy: DeviceActivationPolicy,
     actor: str,
+    *,
+    expected_revision: int | None = None,
 ) -> DeviceActivationPolicy:
+    require_locking_transaction(db, purpose="Activation policy validation")
+    db.refresh(policy, with_for_update=True)
     if policy.status != ArtifactVersionStatus.DRAFT:
         raise ValueError("Only draft activation policies can be validated")
-    version = _check_policy_artifact(
-        db,
-        protocol=policy.protocol,
-        artifact_version_id=policy.artifact_version_id,
-        require_published=True,
-    )
-    definition = version.collector_definition
-    if definition is None:
-        raise ValueError("Collector definition is missing")
-    context = _template_context(
-        device_id="00000000-0000-0000-0000-000000000000",
-        device_name="validation-device",
-        management_ip="192.0.2.1",
-        port=443,
-        protocol=policy.protocol,
-        site="VALIDATION",
-    )
-    target = _render_value(policy.target_template, context, "target_template")
-    configuration = _render_value(
-        policy.configuration_defaults,
-        context,
-        "configuration_defaults",
-    )
-    selector = _render_value(policy.worker_selector, context, "worker_selector")
-    if not isinstance(target, dict) or not isinstance(configuration, dict):
-        raise ValueError("Activation policy templates must render to objects")
-    if not isinstance(selector, dict) or any(
-        not isinstance(key, str) or not isinstance(value, str)
-        for key, value in selector.items()
-    ):
-        raise ValueError("worker_selector must render to string key/value pairs")
-    validate_instance(target, definition.target_schema, "activation target template")
-    validate_instance(
-        {**definition.defaults, **configuration},
-        definition.config_schema,
-        "activation configuration template",
-    )
-    if (
-        definition.adapter_type == "psrp_cim"
-        and policy.execution_mode != CollectorDeploymentMode.ON_DEMAND
-    ):
-        raise ValueError("psrp_cim activation policies must use on_demand execution")
+    if expected_revision is None and policy.revision > 1:
+        raise ActivationPolicyRevisionConflict(
+            "Validation of an edited draft requires expected_revision"
+        )
+    if expected_revision is not None and expected_revision != policy.revision:
+        raise ActivationPolicyRevisionConflict("Activation policy draft revision changed")
+    validate_activation_policy_templates(db, policy)
     content = {
         "name": policy.name,
         "version": policy.version,
@@ -338,8 +493,10 @@ def _connection(
     db: Session,
     device_id: str,
     connection_id: str,
+    *,
+    lock: bool = False,
 ) -> DeviceConnection:
-    connection = db.scalar(
+    query = (
         select(DeviceConnection)
         .where(
             DeviceConnection.id == connection_id,
@@ -347,9 +504,14 @@ def _connection(
         )
         .options(
             selectinload(DeviceConnection.device),
-            selectinload(DeviceConnection.activation),
+            selectinload(DeviceConnection.activations).selectinload(
+                DeviceConnectionActivation.policy
+            ),
         )
     )
+    if lock:
+        query = query.with_for_update()
+    connection = db.scalar(query)
     if connection is None:
         raise LookupError("Device connection not found")
     return connection
@@ -400,8 +562,8 @@ def _build_activation_plan(
         raise ValueError("Only published activation policies can be used")
     if policy.protocol != connection.protocol:
         raise ValueError("Activation policy protocol does not match the connection")
-    if policy.adapter_type != connection.adapter_type:
-        raise ValueError("Activation policy adapter does not match the connection")
+    if policy.adapter_type not in PROTOCOL_ACTIVATION_ADAPTERS[connection.protocol]:
+        raise ValueError("Activation policy adapter is incompatible with the connection")
     version = _check_policy_artifact(
         db,
         protocol=policy.protocol,
@@ -445,6 +607,10 @@ def _build_activation_plan(
     deployment = CollectorDeploymentCreate(
         name=_deployment_name(device, connection, policy),
         artifact_version_id=policy.artifact_version_id,
+        scope_device_id=device.id,
+        scope_device_identity_revision=device.identity_revision,
+        target_classification="registered_device",
+        scope_site=device.site,
         target=target,
         configuration=configuration,
         worker_selector=worker_selector,
@@ -470,6 +636,8 @@ def _build_activation_plan(
         "policy_id": policy.id,
         "policy_content_hash": policy.content_hash,
         "connection_id": connection.id,
+        "scope_device_identity_revision": device.identity_revision,
+        "target_classification": deployment.target_classification,
         "verification_time": (
             connection.last_verified_at.isoformat()
             if connection.last_verified_at
@@ -489,6 +657,8 @@ def _build_activation_plan(
         policy_name=policy.name,
         policy_version=policy.version,
         connection_id=connection.id,
+        scope_device_identity_revision=device.identity_revision,
+        target_classification="registered_device",
         deployment_name=deployment.name,
         artifact_version_id=deployment.artifact_version_id,
         artifact_name=version.artifact.name,
@@ -530,6 +700,9 @@ def _restore_approved_deployment(
     now: datetime,
 ) -> None:
     deployment.artifact_version_id = payload.artifact_version_id
+    deployment.scope_device_identity_revision = payload.scope_device_identity_revision
+    deployment.target_classification = payload.target_classification
+    deployment.external_source_reason = payload.external_source_reason
     deployment.target = payload.target
     deployment.configuration = payload.configuration
     deployment.worker_selector = payload.worker_selector
@@ -555,7 +728,7 @@ def approve_activation(
     actor: str,
     reason: str,
 ) -> tuple[DeviceConnectionActivation, CollectorDeployment]:
-    connection = _connection(db, device_id, connection_id)
+    connection = _connection(db, device_id, connection_id, lock=True)
     policy = _activation_policy(db, policy_id)
     plan, deployment_payload = _build_activation_plan(
         db,
@@ -566,21 +739,29 @@ def approve_activation(
     if not secrets.compare_digest(plan.plan_hash, expected_plan_hash):
         raise ValueError("Activation plan changed; preview and approve it again")
 
-    existing = connection.activation
+    existing = next(
+        (
+            item
+            for item in connection.activations
+            if item.capability_key == policy.name
+        ),
+        None,
+    )
     if existing is not None and existing.status == "active":
-        if existing.plan_hash != plan.plan_hash or existing.policy_id != policy.id:
-            raise ValueError("Connection already has a different active deployment")
-        deployment = db.get(CollectorDeployment, existing.deployment_id)
-        if deployment is None:
-            raise LookupError("Active collector deployment not found")
-        expected_hash = deployment_fingerprint(deployment)
-        if (
-            existing.expected_deployment_hash == expected_hash
-            and deployment.enabled
-        ):
-            return existing, deployment
+        if existing.plan_hash == plan.plan_hash and existing.policy_id == policy.id:
+            deployment = db.get(CollectorDeployment, existing.deployment_id)
+            if deployment is None:
+                raise LookupError("Active collector deployment not found")
+            expected_hash = deployment_fingerprint(deployment)
+            if (
+                existing.expected_deployment_hash == expected_hash
+                and deployment.enabled
+            ):
+                return existing, deployment
 
     now = utcnow()
+    replaced_deployment_id: str | None = None
+    replaced_run_in_flight = False
     if (
         existing is not None
         and existing.plan_hash == plan.plan_hash
@@ -602,6 +783,7 @@ def approve_activation(
         if existing is None:
             activation = DeviceConnectionActivation(
                 connection_id=connection.id,
+                capability_key=policy.name,
                 policy_id=policy.id,
                 deployment_id=deployment.id,
                 status="active",
@@ -614,6 +796,21 @@ def approve_activation(
             db.add(activation)
         else:
             activation = existing
+            previous_deployment = (
+                db.get(CollectorDeployment, existing.deployment_id)
+                if existing.deployment_id is not None
+                else None
+            )
+            if previous_deployment is not None:
+                replaced_deployment_id = previous_deployment.id
+                replaced_run_in_flight = (
+                    previous_deployment.lease_expires_at is not None
+                    and _as_utc(previous_deployment.lease_expires_at) >= now
+                )
+                previous_deployment.enabled = False
+                previous_deployment.next_run_at = None
+                previous_deployment.updated_at = now
+            activation.capability_key = policy.name
             activation.policy_id = policy.id
             activation.deployment_id = deployment.id
             activation.plan_hash = plan.plan_hash
@@ -655,7 +852,11 @@ def approve_activation(
         entity_id=connection.id,
         details={
             "policy_id": policy.id,
+            "activation_id": activation.id,
+            "capability_key": activation.capability_key,
             "deployment_id": deployment.id,
+            "replaced_deployment_id": replaced_deployment_id,
+            "replaced_run_in_flight": replaced_run_in_flight,
             "plan_hash": plan.plan_hash,
             "reason": reason,
             "warnings": plan.warnings,
@@ -672,11 +873,23 @@ def deactivate_connection(
     device_id: str,
     connection_id: str,
     *,
+    activation_id: str | None = None,
     actor: str,
     reason: str,
 ) -> tuple[DeviceConnectionActivation, CollectorDeployment]:
-    connection = _connection(db, device_id, connection_id)
-    activation = connection.activation
+    connection = _connection(db, device_id, connection_id, lock=True)
+    active = [item for item in connection.activations if item.status == "active"]
+    if activation_id is None:
+        if len(active) > 1:
+            raise ValueError(
+                "Connection has multiple active capabilities; specify activation_id"
+            )
+        activation = active[0] if active else None
+    else:
+        activation = next(
+            (item for item in connection.activations if item.id == activation_id),
+            None,
+        )
     if activation is None or activation.deployment_id is None:
         raise LookupError("Connection has no activated collector deployment")
     if activation.status != "active":
@@ -710,6 +923,8 @@ def deactivate_connection(
         entity_type="device_connection",
         entity_id=connection.id,
         details={
+            "activation_id": activation.id,
+            "capability_key": activation.capability_key,
             "deployment_id": deployment.id,
             "reason": reason,
             "run_in_flight": lease_active,

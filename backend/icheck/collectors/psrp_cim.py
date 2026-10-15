@@ -126,6 +126,9 @@ def collect_psrp_cim(assignment: dict[str, Any]) -> list[dict[str, Any]]:
             "PSRP/CIM execution requires an external credential-provider-backed "
             "executor"
         )
+    credential = runtime.get("credential")
+    if not isinstance(credential, dict) or not credential:
+        raise RuntimeError("PSRP/CIM credential was not resolved")
 
     operations = _operations(configuration.get("operations"))
     timeout_seconds = int(configuration.get("timeout_seconds", 30))
@@ -158,9 +161,11 @@ def collect_psrp_cim(assignment: dict[str, Any]) -> list[dict[str, Any]]:
             port=port,
             use_ssl=True,
             credential_profile_ref=credential_ref,
+            credential=dict(credential),
             operation=operation,
             script=CIM_OPERATIONS[operation],
             timeout_seconds=timeout_seconds,
+            max_response_bytes=max_bytes,
         )
         records = result if isinstance(result, list) else [result]
         for record in records:

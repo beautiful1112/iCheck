@@ -6,23 +6,34 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
+from ..credentials import CredentialUnavailable
 from ..metric_schemas import (
     MetricBackendCreate,
     MetricBackendHealth,
+    MetricBackendUpdate,
     PrometheusInstantQuery,
     PrometheusQueryResult,
     PrometheusRangeQuery,
 )
-from ..models import CredentialProfile, MetricBackend, utcnow
+from ..models import MetricBackend, utcnow
 from .audit import record_audit_event
 from .collectors import assert_no_inline_secrets
+from .observability_auth import (
+    resolve_backend_auth,
+    validate_backend_credential_profile,
+)
+from .control_plane_auth import PrincipalContext
+from .metric_query_scope import (
+    MetricScopeError,
+    compile_scoped_query,
+    query_authority,
+)
 
 
 MAX_PROMETHEUS_RESPONSE_BYTES = 10_000_000
@@ -75,20 +86,6 @@ def _validate_url(url: str, allowed_hosts: list[str], field: str) -> str:
     return url.rstrip("/")
 
 
-def _credential_profile(
-    db: Session,
-    reference: str,
-) -> CredentialProfile | None:
-    return db.scalar(
-        select(CredentialProfile).where(
-            or_(
-                CredentialProfile.id == reference,
-                CredentialProfile.name == reference,
-            )
-        )
-    )
-
-
 def create_metric_backend(
     db: Session,
     payload: MetricBackendCreate,
@@ -110,23 +107,13 @@ def create_metric_backend(
         else None
     )
     assert_no_inline_secrets(payload.external_labels, "external_labels")
-    if payload.credential_profile_ref:
-        profile = _credential_profile(db, payload.credential_profile_ref)
-        if profile is None:
-            raise ValueError(
-                f"Credential profile {payload.credential_profile_ref!r} "
-                "does not exist"
-            )
-        if not profile.enabled:
-            raise ValueError(
-                f"Credential profile {payload.credential_profile_ref!r} "
-                "is disabled"
-            )
-        if "prometheus_query" not in profile.allowed_adapters:
-            raise ValueError(
-                f"Credential profile {payload.credential_profile_ref!r} "
-                "does not allow adapter 'prometheus_query'"
-            )
+    validate_backend_credential_profile(
+        db,
+        auth_type=payload.auth_type,
+        auth_header_name=payload.auth_header_name,
+        credential_profile_ref=payload.credential_profile_ref,
+        adapter_type="prometheus_query",
+    )
 
     backend = MetricBackend(
         **payload.model_dump(
@@ -149,6 +136,10 @@ def create_metric_backend(
                 "provider": backend.provider,
                 "query_host": urlsplit(query_base_url).hostname,
                 "remote_write_configured": remote_write_url is not None,
+                "auth_type": backend.auth_type,
+                "credential_profile_configured": bool(
+                    backend.credential_profile_ref
+                ),
             },
         )
         db.commit()
@@ -166,6 +157,107 @@ def get_metric_backend(db: Session, backend_id: str) -> MetricBackend:
     return backend
 
 
+def update_metric_backend(
+    db: Session,
+    backend: MetricBackend,
+    payload: MetricBackendUpdate,
+    *,
+    allowed_hosts: list[str],
+) -> MetricBackend:
+    db.refresh(backend, with_for_update=True)
+    if backend.revision != payload.expected_revision:
+        raise ValueError(
+            "Metric backend revision conflict: "
+            f"expected {payload.expected_revision}, current {backend.revision}"
+        )
+    query_base_url = _validate_url(
+        payload.query_base_url,
+        allowed_hosts,
+        "query_base_url",
+    )
+    remote_write_url = (
+        _validate_url(
+            payload.remote_write_url,
+            allowed_hosts,
+            "remote_write_url",
+        )
+        if payload.remote_write_url
+        else None
+    )
+    assert_no_inline_secrets(payload.external_labels, "external_labels")
+    validate_backend_credential_profile(
+        db,
+        auth_type=payload.auth_type,
+        auth_header_name=payload.auth_header_name,
+        credential_profile_ref=payload.credential_profile_ref,
+        adapter_type="prometheus_query",
+    )
+    previous = {
+        "name": backend.name,
+        "provider": backend.provider,
+        "query_base_url": backend.query_base_url,
+        "remote_write_url": backend.remote_write_url,
+        "auth_type": backend.auth_type,
+        "auth_header_name": backend.auth_header_name,
+        "credential_profile_ref": backend.credential_profile_ref,
+        "external_labels": backend.external_labels,
+        "enabled": backend.enabled,
+    }
+    current = {
+        "name": payload.name,
+        "provider": payload.provider,
+        "query_base_url": query_base_url,
+        "remote_write_url": remote_write_url,
+        "auth_type": payload.auth_type,
+        "auth_header_name": payload.auth_header_name,
+        "credential_profile_ref": payload.credential_profile_ref,
+        "external_labels": payload.external_labels,
+        "enabled": payload.enabled,
+    }
+    changed_fields = sorted(
+        field
+        for field in current
+        if field != "credential_profile_ref" and previous[field] != current[field]
+    )
+    if previous["credential_profile_ref"] != current["credential_profile_ref"]:
+        changed_fields.append("credential_profile")
+    if not changed_fields:
+        raise ValueError("Metric backend update does not change any fields")
+    for field, value in current.items():
+        setattr(backend, field, value)
+    backend.revision += 1
+    backend.last_checked_at = None
+    backend.last_health_status = None
+    backend.last_health_error = None
+    backend.updated_at = utcnow()
+    record_audit_event(
+        db,
+        event_type="metrics.backend.updated",
+        actor_type="user",
+        actor_id=payload.actor,
+        entity_type="metric_backend",
+        entity_id=backend.id,
+        details={
+            "revision": backend.revision,
+            "changed_fields": sorted(changed_fields),
+            "query_host": urlsplit(query_base_url).hostname,
+            "remote_write_configured": remote_write_url is not None,
+            "auth_type": backend.auth_type,
+            "credential_profile_configured": bool(
+                backend.credential_profile_ref
+            ),
+            "enabled": backend.enabled,
+        },
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise ValueError("Metric backend name already exists") from exc
+    db.refresh(backend)
+    return backend
+
+
 def _response_error(document: dict[str, Any]) -> str:
     error_type = document.get("errorType")
     error = document.get("error") or "Prometheus query failed"
@@ -173,6 +265,7 @@ def _response_error(document: dict[str, Any]) -> str:
 
 
 def _request_prometheus(
+    db: Session,
     backend: MetricBackend,
     endpoint: Literal["query", "query_range"],
     fields: dict[str, str],
@@ -180,11 +273,18 @@ def _request_prometheus(
 ) -> dict[str, Any]:
     if not backend.enabled:
         raise MetricBackendUnavailable("Metric backend is disabled")
-    if backend.credential_profile_ref:
-        raise MetricBackendUnavailable(
-            "Credential-backed metric queries require a configured "
-            "credential-provider adapter"
+    try:
+        auth = resolve_backend_auth(
+            db,
+            auth_type=backend.auth_type,
+            auth_header_name=backend.auth_header_name,
+            credential_profile_ref=backend.credential_profile_ref,
+            adapter_type="prometheus_query",
         )
+    except (CredentialUnavailable, ValueError) as exc:
+        raise MetricBackendUnavailable(
+            f"Metric backend credential is unavailable: {exc}"
+        ) from exc
     try:
         query_base_url = _validate_url(
             backend.query_base_url,
@@ -201,11 +301,12 @@ def _request_prometheus(
             "Accept": "application/json",
             "Content-Type": "application/x-www-form-urlencoded",
             "User-Agent": "iCheck-metrics/0.1",
+            **auth.headers,
         },
         method="POST",
     )
     try:
-        with build_opener(_NoRedirect()).open(
+        with build_opener(ProxyHandler({}), _NoRedirect()).open(
             request,
             timeout=timeout_seconds + 2,
         ) as response:
@@ -216,7 +317,7 @@ def _request_prometheus(
             document = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             document = {}
-        message = _response_error(document)
+        message = auth.redactor.redact_text(_response_error(document))
         if exc.code in {400, 422}:
             raise MetricQueryError(message) from exc
         raise MetricBackendUnavailable(
@@ -224,7 +325,8 @@ def _request_prometheus(
         ) from exc
     except (OSError, URLError) as exc:
         raise MetricBackendUnavailable(
-            f"Metric backend request failed: {exc}"
+            "Metric backend request failed: "
+            f"{auth.redactor.redact_text(str(exc))}"
         ) from exc
     if len(body) > MAX_PROMETHEUS_RESPONSE_BYTES:
         raise MetricBackendUnavailable(
@@ -240,8 +342,12 @@ def _request_prometheus(
         raise MetricBackendUnavailable(
             "Metric backend returned an invalid response envelope"
         )
+    document = auth.redactor.redact_value(document)
+    assert isinstance(document, dict)
     if document.get("status") != "success":
-        raise MetricQueryError(_response_error(document))
+        raise MetricQueryError(
+            auth.redactor.redact_text(_response_error(document))
+        )
     data = document.get("data")
     if not isinstance(data, dict):
         raise MetricBackendUnavailable(
@@ -284,12 +390,13 @@ def _record_query(
     query: str,
     mode: str,
     result: PrometheusQueryResult,
+    actor_type: str,
 ) -> None:
     series_count = len(result.result) if isinstance(result.result, list) else 1
     record_audit_event(
         db,
         event_type="metrics.query.executed",
-        actor_type="user",
+        actor_type=actor_type,
         actor_id=actor,
         entity_type="metric_backend",
         entity_id=backend.id,
@@ -312,11 +419,12 @@ def _record_query_failure(
     query: str,
     mode: str,
     error: Exception,
+    actor_type: str,
 ) -> None:
     record_audit_event(
         db,
         event_type="metrics.query.failed",
-        actor_type="user",
+        actor_type=actor_type,
         actor_id=actor,
         entity_type="metric_backend",
         entity_id=backend.id,
@@ -334,6 +442,9 @@ def query_instant(
     db: Session,
     backend: MetricBackend,
     payload: PrometheusInstantQuery,
+    *,
+    actor_type: str = "user",
+    principal: PrincipalContext | None = None,
 ) -> PrometheusQueryResult:
     fields = {
         "query": payload.query,
@@ -343,12 +454,28 @@ def query_instant(
     if payload.time:
         fields["time"] = _iso_timestamp(payload.time)
     try:
+        authority = query_authority(
+            db, backend, principal, internal_service=actor_type == "service"
+        )
+        fields["query"] = compile_scoped_query(payload.query, authority)
         document = _request_prometheus(
+            db,
             backend,
             "query",
             fields,
             payload.timeout_seconds,
         )
+        if query_authority(
+            db, backend, principal, internal_service=actor_type == "service"
+        ) != authority:
+            raise MetricScopeError("Metric query authority changed during evaluation")
+    except MetricScopeError as exc:
+        error = MetricQueryError(str(exc))
+        _record_query_failure(
+            db, backend, actor=payload.actor, query=payload.query,
+            mode="instant", error=error, actor_type=actor_type,
+        )
+        raise error from exc
     except (MetricQueryError, MetricBackendUnavailable) as exc:
         _record_query_failure(
             db,
@@ -357,6 +484,7 @@ def query_instant(
             query=payload.query,
             mode="instant",
             error=exc,
+            actor_type=actor_type,
         )
         raise
     result = _query_result(backend, "instant", document)
@@ -367,6 +495,7 @@ def query_instant(
         query=payload.query,
         mode="instant",
         result=result,
+        actor_type=actor_type,
     )
     return result
 
@@ -375,13 +504,21 @@ def query_range(
     db: Session,
     backend: MetricBackend,
     payload: PrometheusRangeQuery,
+    *,
+    actor_type: str = "user",
+    principal: PrincipalContext | None = None,
 ) -> PrometheusQueryResult:
     try:
+        authority = query_authority(
+            db, backend, principal, internal_service=actor_type == "service"
+        )
+        scoped_query = compile_scoped_query(payload.query, authority)
         document = _request_prometheus(
+            db,
             backend,
             "query_range",
             {
-                "query": payload.query,
+                "query": scoped_query,
                 "start": _iso_timestamp(payload.start),
                 "end": _iso_timestamp(payload.end),
                 "step": f"{payload.step_seconds}s",
@@ -390,6 +527,17 @@ def query_range(
             },
             payload.timeout_seconds,
         )
+        if query_authority(
+            db, backend, principal, internal_service=actor_type == "service"
+        ) != authority:
+            raise MetricScopeError("Metric query authority changed during evaluation")
+    except MetricScopeError as exc:
+        error = MetricQueryError(str(exc))
+        _record_query_failure(
+            db, backend, actor=payload.actor, query=payload.query,
+            mode="range", error=error, actor_type=actor_type,
+        )
+        raise error from exc
     except (MetricQueryError, MetricBackendUnavailable) as exc:
         _record_query_failure(
             db,
@@ -398,6 +546,7 @@ def query_range(
             query=payload.query,
             mode="range",
             error=exc,
+            actor_type=actor_type,
         )
         raise
     result = _query_result(backend, "range", document)
@@ -408,6 +557,7 @@ def query_range(
         query=payload.query,
         mode="range",
         result=result,
+        actor_type=actor_type,
     )
     return result
 
@@ -422,6 +572,7 @@ def check_metric_backend(
     error: str | None = None
     try:
         _request_prometheus(
+            db,
             backend,
             "query",
             {

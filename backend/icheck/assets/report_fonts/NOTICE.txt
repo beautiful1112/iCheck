@@ -1,0 +1,13 @@
+iCheck report font: Noto Sans SC, static weight 400.
+Copyright: © 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.
+Licensed under the SIL Open Font License 1.1; see OFL.txt.
+This is a modified font (weight instantiation), not an Adobe-endorsed product.
+
+Source repository: https://github.com/notofonts/noto-cjk
+Source commit: f8d157532fbfaeda587e826d4cd5b21a49186f7c
+Source path: Sans/Variable/TTF/Subset/NotoSansSC-VF.ttf
+Source SHA256: d68bafcb48a2707749396aa12bbbd833cb70401f3a9a689fd2902c7e0d295964
+Build command (fonttools 4.66.1):
+  fonttools varLib.instancer NotoSansSC-VF.ttf wght=400 --output=NotoSansSC-Regular.ttf
+Bundled SHA256: e52dcae020461843035b81c1b46aee7c22cea493f79997165e185be3d8451d1a
+Runtime uses only this packaged, checksum-verified font, never a caller-provided path.

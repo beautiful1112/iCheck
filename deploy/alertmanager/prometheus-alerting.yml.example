@@ -1,0 +1,8 @@
+# Merge these top-level keys into the EXISTING Prometheus configuration.
+# Preserve every existing scrape job, retention setting and target assignment.
+rule_files:
+  - /var/lib/icheck-metric-rules/rules.yml
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: [127.0.0.1:9093]

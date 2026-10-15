@@ -176,3 +176,42 @@ def test_worker_reports_bounded_success_and_failure_evidence(monkeypatch):
     assert failed_payload["status"] == "failed"
     assert failed_payload["error"] == "connection refused"
     assert failed_payload["evidence"]["reachable"] is False
+@pytest.mark.parametrize("adapter,port", [("node_exporter",9100),("cadvisor",8080),("vmware_exporter",9272)])
+def test_unconfigured_native_exporter_onboarding_proves_transport_only(monkeypatch, adapter, port):
+    from contextlib import nullcontext
+    from icheck.device_preflight_worker import execute_device_preflight
+    calls = []
+    def local_fixture_connection(address, *, timeout):
+        calls.append((address, timeout))
+        return nullcontext()
+    monkeypatch.setattr("icheck.device_preflight_worker.socket.create_connection", local_fixture_connection)
+    evidence, _ = execute_device_preflight({"adapter_type":adapter,"target_host":"127.0.0.1","port":port,"configuration":{}},
+        allowed_targets=["127.0.0.1/32"],timeout_seconds=2,snmp_exporter_url=None,
+        exporter_allowed_hosts=[],snmp_allowed_targets=[],lease_seconds=60)
+    assert calls == [(("127.0.0.1", port), 2)]
+    assert evidence["verification_level"] == "transport"
+    assert evidence["authentication_tested"] is False and "metric_samples" not in evidence
+
+
+def test_icmp_dependency_check_creates_no_packets_and_refuses_missing_permission(monkeypatch):
+    from contextlib import nullcontext
+    from icheck.device_preflight_worker import require_icmp_preflight_support
+    import socket
+    calls = []
+    monkeypatch.setattr("icheck.device_preflight_worker.shutil.which", lambda _: "/fixture/ping")
+    def permit(family, kind, protocol):
+        calls.append((family,kind,protocol))
+        return nullcontext()
+    monkeypatch.setattr("icheck.device_preflight_worker.socket.socket", permit)
+    require_icmp_preflight_support((4,6))
+    assert {item[0] for item in calls} == {socket.AF_INET,socket.AF_INET6}
+    assert all(item[1] == socket.SOCK_DGRAM for item in calls)
+    def deny(*_): raise PermissionError("fixture")
+    monkeypatch.setattr("icheck.device_preflight_worker.socket.socket", deny)
+    with pytest.raises(ValueError, match="authorized local ICMP socket"):
+        require_icmp_preflight_support()
+    monkeypatch.setattr("icheck.device_preflight_worker.shutil.which", lambda _: None)
+    with pytest.raises(ValueError, match="ping executable"):
+        require_icmp_preflight_support()
+
+

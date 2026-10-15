@@ -1,0 +1,31 @@
+[Unit]
+Description=iCheck current-authority continuous monitoring gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=icheck-monitoring-gateway
+Group=icheck-monitoring-gateway
+UMask=0077
+WorkingDirectory=/opt/icheck
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/icheck/.venv/bin/icheck-monitoring-gateway --config /etc/icheck-workers/monitoring-gateway/config.json
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+TasksMax=256
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

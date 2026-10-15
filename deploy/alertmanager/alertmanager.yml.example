@@ -1,0 +1,19 @@
+# Native single-node preview. Receiver identity/token must be provisioned first.
+# Never use the human administrator token or put a raw token here.
+route:
+  receiver: icheck-inbox
+  group_by: [icheck_metric_rule_id, icheck_metric_rule_revision]
+  group_wait: 5s
+  group_interval: 30s
+  repeat_interval: 1h
+receivers:
+  - name: icheck-inbox
+    webhook_configs:
+      - url: http://127.0.0.1:8000/api/v1/metric-alerts/webhook
+        send_resolved: true
+        timeout: 5s
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/icheck-workers/alertmanager/receiver.token
+          follow_redirects: false

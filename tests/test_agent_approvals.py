@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy import select
 
-from icheck.agent_schemas import AgentActionDecision
+from icheck.agent_schemas import AgentActionDecision, AgentExecutionAssignment
+from icheck.agent_worker import execute_remote_assignment
 from icheck.database import SessionLocal
+from icheck.config import get_settings
 from icheck.langgraph_runtime import GraphDecision, GraphToolRequest
 from icheck.models import (
     AgentActionProposal,
@@ -19,6 +23,8 @@ from icheck.services.agent_approvals import (
     ActionOutcomeUnknown,
     action_plan_hash,
     decide_action_proposal,
+    finish_action_proposal,
+    propose_action,
     validate_resumed_action,
 )
 from icheck.services.agent_graph import (
@@ -27,6 +33,14 @@ from icheck.services.agent_graph import (
 )
 from icheck.services.agent_tools import INTERNAL_HANDLERS
 from icheck.services.control_plane_auth import PrincipalContext
+
+
+def test_action_completion_cannot_rebind_an_existing_tool_call():
+    proposal = SimpleNamespace(tool_call_id="original-call")
+    call = SimpleNamespace(id="replacement-call")
+    with pytest.raises(ValueError, match="different Tool call"):
+        finish_action_proposal(None, proposal, call=call)
+    assert proposal.tool_call_id == "original-call"
 
 
 def _configure_route(client) -> None:
@@ -131,6 +145,24 @@ class ApprovalReasoner:
             conclusion="The approved change and post-check succeeded.",
             token_usage=5,
         )
+
+
+class APIAgentControlClient:
+    def __init__(self, client, access_token):
+        self.client = client
+        self.access_token = access_token
+
+    def request(self, method, path, payload, **_kwargs):
+        response = self.client.request(
+            method,
+            path,
+            headers={"Authorization": f"Bearer {self.access_token}"},
+            json=payload,
+        )
+        assert response.status_code < 400, response.text
+        if response.status_code == 204 or not response.content:
+            return None
+        return response.json()
 
 
 def test_four_eyes_approval_resumes_same_langgraph_thread(client, monkeypatch):
@@ -281,6 +313,176 @@ def test_four_eyes_approval_resumes_same_langgraph_thread(client, monkeypatch):
         assert snapshot.checkpoint["channel_values"]["status"] == "completed"
 
 
+def test_http_only_worker_preserves_four_eyes_interrupt_and_resume(
+    client,
+    monkeypatch,
+):
+    _configure_route(client)
+    tool = client.post(
+        "/api/v1/agent/tools",
+        json={
+            "name": "test.set_interface_description",
+            "description": "Acceptance-only idempotent change handler.",
+            "transport": "internal",
+            "handler": "test.set_interface_description",
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["device_id", "interface", "description"],
+                "properties": {
+                    "device_id": {"type": "string"},
+                    "interface": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+            },
+            "output_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["changed", "post_check"],
+                "properties": {
+                    "changed": {"type": "boolean"},
+                    "post_check": {"type": "string"},
+                },
+            },
+            "risk_level": "change",
+            "read_only": False,
+            "required_permissions": ["changes.execute"],
+            "created_by": "platform.admin",
+        },
+    )
+    assert tool.status_code == 201, tool.text
+    investigation_id = _start_investigation(client)
+    calls = []
+
+    def change_handler(_db, arguments):
+        calls.append(arguments)
+        return {
+            "changed": True,
+            "post_check": arguments["description"],
+        }, []
+
+    monkeypatch.setitem(
+        INTERNAL_HANDLERS,
+        "test.set_interface_description",
+        change_handler,
+    )
+    reasoner = ApprovalReasoner()
+    monkeypatch.setattr(
+        "icheck.services.agent_remote_runtime.OpenAICompatibleReasoner",
+        lambda *_args, **_kwargs: reasoner,
+    )
+    registration = client.post(
+        "/api/v1/agent/workers/register",
+        headers={
+            "X-iCheck-Registration-Token": "test-agent-registration-token"
+        },
+        json={
+            "name": "remote-approval-worker",
+            "capabilities": ["openai_compatible"],
+            "labels": {"zone": "lab"},
+        },
+    )
+    assert registration.status_code == 200, registration.text
+    token = registration.json()["access_token"]
+    worker_id = registration.json()["worker"]["id"]
+    control = APIAgentControlClient(client, token)
+    first_claim = client.post(
+        f"/api/v1/agent/workers/{worker_id}/executions/claim",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"max_assignments": 1, "lease_seconds": 60},
+    )
+    first_assignment = AgentExecutionAssignment.model_validate(
+        first_claim.json()[0]
+    )
+    waiting = execute_remote_assignment(
+        control,
+        first_assignment,
+        lease_seconds=60,
+        credential_broker=None,
+        mcp_allowed_hosts=[],
+    )
+    assert waiting["status"] == "waiting_approval"
+    assert calls == []
+    with SessionLocal() as db:
+        execution = db.scalar(
+            select(AgentExecution).where(
+                AgentExecution.investigation_id == investigation_id
+            )
+        )
+        assert execution.completion_worker_id == worker_id
+        assert execution.completion_token_hash is not None
+        assert execution.completion_request_hash is not None
+
+    with SessionLocal() as db:
+        proposal = db.scalar(
+            select(AgentActionProposal).where(
+                AgentActionProposal.investigation_id == investigation_id
+            )
+        )
+        assert proposal is not None
+        proposal_id = proposal.id
+        plan_hash = proposal.plan_hash
+    approved = client.post(
+        f"/api/v1/agent/action-proposals/{proposal_id}/decision",
+        json={
+            "decision": "approve",
+            "expected_plan_hash": plan_hash,
+            "reason": "Peer reviewed the exact bounded test plan.",
+        },
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "approved"
+    with SessionLocal() as db:
+        execution = db.scalar(
+            select(AgentExecution).where(
+                AgentExecution.investigation_id == investigation_id
+            )
+        )
+        assert execution.status == AgentExecutionStatus.QUEUED
+        assert execution.completion_worker_id is None
+        assert execution.completion_token_hash is None
+        assert execution.completion_request_hash is None
+        execution_id = execution.id
+    stale_completion = client.post(
+        f"/api/v1/agent/executions/{execution_id}/complete",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "lease_token": first_assignment.lease_token,
+            "status": "waiting_approval",
+        },
+    )
+    assert stale_completion.status_code == 409
+
+    second_claim = client.post(
+        f"/api/v1/agent/workers/{worker_id}/executions/claim",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"max_assignments": 1, "lease_seconds": 60},
+    )
+    second_assignment = AgentExecutionAssignment.model_validate(
+        second_claim.json()[0]
+    )
+    assert second_assignment.attempt == 2
+    assert second_assignment.resume_required is True
+    completed = execute_remote_assignment(
+        control,
+        second_assignment,
+        lease_seconds=60,
+        credential_broker=None,
+        mcp_allowed_hosts=[],
+    )
+    assert completed["status"] == "succeeded"
+    assert reasoner.calls == 2
+    assert len(calls) == 1
+    with SessionLocal() as db:
+        investigation = db.get(Investigation, investigation_id)
+        proposal = db.get(AgentActionProposal, proposal_id)
+        assert investigation is not None
+        assert proposal is not None
+        assert investigation.status == "completed"
+        assert proposal.status == "succeeded"
+        assert proposal.tool_call_id is not None
+
+
 def test_executing_action_is_not_automatically_replayed(client, monkeypatch):
     _configure_route(client)
     tool = client.post(
@@ -334,3 +536,41 @@ def test_executing_action_is_not_automatically_replayed(client, monkeypatch):
                 arguments={},
                 purpose="Ambiguous action",
             )
+
+
+def test_strict_change_policy_rejects_legacy_tool(client, monkeypatch):
+    _configure_route(client)
+    tool_response = client.post(
+        "/api/v1/agent/tools",
+        json={
+            "name": "test.legacy_change",
+            "description": "Legacy change without a governed contract.",
+            "transport": "internal",
+            "handler": "test.legacy_change",
+            "input_schema": {"type": "object"},
+            "output_schema": {"type": "object"},
+            "risk_level": "change",
+            "read_only": False,
+            "created_by": "platform.admin",
+        },
+    )
+    assert tool_response.status_code == 201, tool_response.text
+    investigation_id = _start_investigation(client)
+    monkeypatch.setenv("ICHECK_REQUIRE_GOVERNED_CHANGE_CONTRACTS", "true")
+    get_settings.cache_clear()
+    try:
+        with SessionLocal() as db:
+            investigation = db.get(Investigation, investigation_id)
+            tool = db.get(AgentToolRegistration, tool_response.json()["id"])
+            assert investigation is not None and tool is not None
+            with pytest.raises(ValueError, match="requires icheck.change-tool/v1"):
+                propose_action(
+                    db,
+                    investigation,
+                    tool,
+                    iteration=1,
+                    arguments={},
+                    purpose="This legacy proposal must be blocked.",
+                )
+    finally:
+        get_settings.cache_clear()

@@ -109,6 +109,30 @@ def ensure_windows_exporter_activation_policy(
     )
 
 
+def ensure_snmp_topology_activation_policy(
+    db: Session,
+    artifact: Artifact,
+) -> DeviceActivationPolicy:
+    return _ensure_policy(
+        db,
+        artifact=artifact,
+        payload={
+            "name": "builtin-snmp-device-adjacency",
+            "protocol": "snmp",
+            "target_template": {
+                "exporter_url": "http://127.0.0.1:9116",
+                "target": "${management_ip}",
+                "local_device_key": "${device_id}",
+                "local_display_name": "${device_name}",
+            },
+            "configuration_defaults": {"protocol": "lldp"},
+            "worker_selector": {"site": "${site}"},
+            "execution_mode": CollectorDeploymentMode.SCHEDULED,
+            "schedule_seconds": 300,
+        },
+    )
+
+
 def ensure_psrp_cim_activation_policy(
     db: Session,
     artifact: Artifact,
@@ -136,11 +160,13 @@ def ensure_builtin_activation_policies(
     db: Session,
     *,
     snmp_artifact: Artifact,
+    snmp_topology_artifact: Artifact,
     windows_exporter_artifact: Artifact,
     psrp_cim_artifact: Artifact,
 ) -> list[DeviceActivationPolicy]:
     return [
         ensure_snmp_activation_policy(db, snmp_artifact),
+        ensure_snmp_topology_activation_policy(db, snmp_topology_artifact),
         ensure_windows_exporter_activation_policy(db, windows_exporter_artifact),
         ensure_psrp_cim_activation_policy(db, psrp_cim_artifact),
     ]

@@ -1,0 +1,34 @@
+[Unit]
+Description=iCheck protected native SNMP module installer
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=icheck
+UMask=0077
+RuntimeDirectory=icheck-snmp-installer
+RuntimeDirectoryMode=0750
+ExecStart=/opt/icheck/.venv/bin/python -I -m icheck.snmp_install_broker
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_CHOWN
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=256M
+CPUQuota=100%
+TasksMax=16
+ReadWritePaths=/etc/icheck-workers/snmp-runtime
+
+[Install]
+WantedBy=multi-user.target

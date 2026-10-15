@@ -2,6 +2,7 @@ import json
 
 from icheck.builtin_artifacts import (
     snmp_exporter_artifact_payload,
+    snmp_topology_artifact_payload,
     windows_exporter_artifact_payload,
 )
 from icheck.database import SessionLocal
@@ -63,7 +64,7 @@ def verify_snmp_connection(client, device):
             "name": "lab-snmp-activation-worker",
             "site": "LAB",
             "capabilities": ["snmp_exporter"],
-            "labels": {"environment": "lab"},
+            "labels": {"environment": "lab", "io_supervisor_v1": True},
         },
     )
     assert registration.status_code == 200, registration.text
@@ -134,6 +135,98 @@ def publish_policy(client, payload):
     )
     assert published.status_code == 200, published.text
     return published.json()
+
+
+def topology_activation_policy_payload(artifact_version_id):
+    return {
+        "name": "lab-snmp-device-adjacency",
+        "protocol": "snmp",
+        "artifact_version_id": artifact_version_id,
+        "target_template": {
+            "exporter_url": "http://127.0.0.1:9116",
+            "target": "${management_ip}",
+            "local_device_key": "${device_id}",
+            "local_display_name": "${device_name}",
+        },
+        "configuration_defaults": {"protocol": "lldp"},
+        "worker_selector": {"site": "${site}"},
+        "execution_mode": "scheduled",
+        "schedule_seconds": 90,
+        "created_by": "lab.admin",
+    }
+
+
+def preview_and_approve(client, device_id, connection_id, policy, reason):
+    base_url = (
+        f"/api/v1/assets/devices/{device_id}/connections/"
+        f"{connection_id}/activation"
+    )
+    preview = client.post(
+        f"{base_url}/preview",
+        json={"policy_id": policy["id"]},
+    )
+    assert preview.status_code == 200, preview.text
+    approved = client.post(
+        f"{base_url}/approve",
+        json={
+            "policy_id": policy["id"],
+            "expected_plan_hash": preview.json()["plan_hash"],
+            "actor": "lab.admin",
+            "reason": reason,
+        },
+    )
+    assert approved.status_code == 200, approved.text
+    return preview.json(), approved.json()
+
+
+def test_identity_correction_waits_for_activation_deactivation(client):
+    artifact = publish_artifact(client, snmp_exporter_artifact_payload())
+    device = onboard_snmp_device(client)
+    connection = verify_snmp_connection(client, device)
+    policy = publish_policy(
+        client, activation_policy_payload(artifact["id"])
+    )
+    _, approved = preview_and_approve(
+        client, device["id"], connection["id"], policy,
+        "Enable SNMP collection before target correction",
+    )
+    correction = {
+        "expected_revision": device["revision"],
+        "name": device["name"],
+        "management_ip": "10.30.0.11",
+        "site": "LAB",
+    }
+    base = f"/api/v1/assets/devices/{device['id']}/identity-correction"
+    blocked = client.post(f"{base}/preview", json=correction)
+    assert blocked.status_code == 200, blocked.text
+    assert blocked.json()["can_commit"] is False
+    assert any("active" in item for item in blocked.json()["blockers"])
+    assert any("enabled" in item for item in blocked.json()["blockers"])
+    refused = client.post(f"{base}/commit", json={
+        **correction, "preview_hash": blocked.json()["preview_hash"],
+        "actor": "lab.admin", "reason": "Move monitored device address",
+    })
+    assert refused.status_code == 409
+
+    deactivated = client.post(
+        f"/api/v1/assets/devices/{device['id']}/connections/"
+        f"{connection['id']}/activation/deactivate",
+        json={"actor": "lab.admin", "reason": "Retire old target before correction"},
+    )
+    assert deactivated.status_code == 200, deactivated.text
+    ready = client.post(f"{base}/preview", json=correction)
+    assert ready.status_code == 200, ready.text
+    assert ready.json()["can_commit"] is True
+    committed = client.post(f"{base}/commit", json={
+        **correction, "preview_hash": ready.json()["preview_hash"],
+        "actor": "lab.admin", "reason": "Move monitored device address",
+    })
+    assert committed.status_code == 200, committed.text
+    assert committed.json()["connections"][0]["verification_status"] == "pending"
+    with SessionLocal() as db:
+        deployment = db.get(CollectorDeployment, approved["deployment"]["id"])
+        assert deployment.enabled is False
+        assert deployment.target["target"] == "10.30.0.10"
 
 
 def test_activation_preview_approval_deactivation_and_reactivation(client):
@@ -314,6 +407,196 @@ def test_activation_policy_rejects_unsafe_templates_and_unverified_connections(c
     assert safe_versions == {2: "published", 1: "deprecated"}
 
 
+def test_policy_draft_edit_is_revision_guarded_audited_and_frozen_after_validation(client):
+    artifact = publish_artifact(client, snmp_exporter_artifact_payload())
+    original = activation_policy_payload(artifact["id"], name="editable-snmp-policy")
+    created = client.post("/api/v1/assets/activation-policies", json=original)
+    assert created.status_code == 201, created.text
+    policy = created.json()
+    assert (policy["version"], policy["revision"], policy["updated_by"]) == (
+        1, 1, "lab.admin",
+    )
+    url = f"/api/v1/assets/activation-policies/{policy['id']}"
+    edited_draft = {
+        **original,
+        "target_template": {**original["target_template"], "target": "${management_ip}"},
+        "schedule_seconds": 120,
+    }
+    changed = client.patch(url, json={
+        "expected_revision": 1, "draft": edited_draft, "actor": "lab.editor",
+    })
+    assert changed.status_code == 200, changed.text
+    edited = changed.json()
+    assert (edited["id"], edited["version"], edited["revision"]) == (
+        policy["id"], 1, 2,
+    )
+    assert edited["schedule_seconds"] == 120
+    assert edited["updated_by"] == "lab.editor"
+    assert edited["updated_at"] is not None
+    stale = client.patch(url, json={
+        "expected_revision": 1, "draft": original, "actor": "lab.editor",
+    })
+    assert stale.status_code == 409
+    unchanged = client.patch(url, json={
+        "expected_revision": 2, "draft": edited_draft, "actor": "lab.editor",
+    })
+    assert unchanged.status_code == 200
+    assert unchanged.json()["revision"] == 2
+    unsafe_edit = client.patch(url, json={
+        "expected_revision": 2,
+        "draft": {**edited_draft, "configuration_defaults": {"password": "not-allowed"}},
+        "actor": "lab.editor",
+    })
+    assert unsafe_edit.status_code == 422
+    assert "inline secret" in unsafe_edit.text
+    renamed = client.patch(url, json={
+        "expected_revision": 2,
+        "draft": {**edited_draft, "name": "different-name"},
+        "actor": "lab.editor",
+    })
+    assert renamed.status_code == 422
+    assert client.get(url).json()["revision"] == 2
+    audits = client.get(
+        "/api/v1/audit-events",
+        params={"event_type": "device.activation_policy.draft_updated"},
+    )
+    assert audits.status_code == 200
+    assert len(audits.json()) == 1
+    details = audits.json()[0]["details"]
+    assert details["revision_before"] == 1
+    assert details["revision_after"] == 2
+    assert details["changed_fields"] == ["schedule_seconds"]
+    assert "10.30.0.10" not in json.dumps(audits.json())
+
+    missing_pin = client.post(f"{url}/validate", json={"actor": "lab.reviewer"})
+    assert missing_pin.status_code == 409
+    stale_pin = client.post(
+        f"{url}/validate",
+        json={"actor": "lab.reviewer", "expected_revision": 1},
+    )
+    assert stale_pin.status_code == 409
+    validated = client.post(
+        f"{url}/validate",
+        json={"actor": "lab.reviewer", "expected_revision": 2},
+    )
+    assert validated.status_code == 200, validated.text
+    assert validated.json()["status"] == "validated"
+    frozen = client.patch(url, json={
+        "expected_revision": 2, "draft": original, "actor": "lab.editor",
+    })
+    assert frozen.status_code == 409
+    published = client.post(f"{url}/publish", json={"actor": "lab.publisher"})
+    assert published.status_code == 200, published.text
+    next_version = client.post("/api/v1/assets/activation-policies", json={
+        **edited_draft, "schedule_seconds": 180,
+    })
+    assert next_version.status_code == 201, next_version.text
+    assert (next_version.json()["version"], next_version.json()["revision"]) == (2, 1)
+    assert client.get(url).json()["status"] == "published"
+
+
+def test_multiple_capabilities_share_one_verified_connection(client):
+    metrics_artifact = publish_artifact(client, snmp_exporter_artifact_payload())
+    topology_artifact = publish_artifact(client, snmp_topology_artifact_payload())
+    device = onboard_snmp_device(client)
+    connection = verify_snmp_connection(client, device)
+    metrics_policy = publish_policy(
+        client,
+        activation_policy_payload(
+            metrics_artifact["id"],
+            name="lab-snmp-metrics",
+        ),
+    )
+    topology_policy = publish_policy(
+        client,
+        topology_activation_policy_payload(topology_artifact["id"]),
+    )
+
+    metrics_plan, metrics_result = preview_and_approve(
+        client,
+        device["id"],
+        connection["id"],
+        metrics_policy,
+        "Activate interface metrics",
+    )
+    _, topology_result = preview_and_approve(
+        client,
+        device["id"],
+        connection["id"],
+        topology_policy,
+        "Activate governed LLDP topology",
+    )
+    assert metrics_result["activation"]["capability_key"] == "lab-snmp-metrics"
+    assert (
+        topology_result["activation"]["capability_key"]
+        == "lab-snmp-device-adjacency"
+    )
+
+    detail = client.get(f"/api/v1/assets/devices/{device['id']}").json()
+    activations = detail["connections"][0]["activations"]
+    assert len(activations) == 2
+    assert {item["status"] for item in activations} == {"active"}
+    assert detail["onboarding_status"] == "monitoring_configured"
+
+    legacy_deactivate = client.post(
+        (
+            f"/api/v1/assets/devices/{device['id']}/connections/"
+            f"{connection['id']}/activation/deactivate"
+        ),
+        json={"actor": "lab.admin", "reason": "Ambiguous legacy request"},
+    )
+    assert legacy_deactivate.status_code == 409
+    assert "multiple active capabilities" in legacy_deactivate.text
+
+    exact_deactivate = client.post(
+        (
+            f"/api/v1/assets/devices/{device['id']}/connections/"
+            f"{connection['id']}/activations/"
+            f"{metrics_result['activation']['id']}/deactivate"
+        ),
+        json={"actor": "lab.admin", "reason": "Pause metrics only"},
+    )
+    assert exact_deactivate.status_code == 200, exact_deactivate.text
+    assert exact_deactivate.json()["deployment"]["enabled"] is False
+    detail = client.get(f"/api/v1/assets/devices/{device['id']}").json()
+    by_key = {
+        item["capability_key"]: item
+        for item in detail["connections"][0]["activations"]
+    }
+    assert by_key["lab-snmp-metrics"]["status"] == "deactivated"
+    assert by_key["lab-snmp-device-adjacency"]["status"] == "active"
+    assert detail["onboarding_status"] == "monitoring_configured"
+
+    replacement_policy = publish_policy(
+        client,
+        {
+            **activation_policy_payload(
+                metrics_artifact["id"],
+                name="lab-snmp-metrics",
+            ),
+            "schedule_seconds": 120,
+        },
+    )
+    _, replacement_result = preview_and_approve(
+        client,
+        device["id"],
+        connection["id"],
+        replacement_policy,
+        "Upgrade the metrics capability schedule",
+    )
+    assert replacement_result["activation"]["id"] == metrics_result["activation"]["id"]
+    assert replacement_result["deployment"]["id"] != metrics_result["deployment"]["id"]
+    assert replacement_result["deployment"]["schedule_seconds"] == 120
+    detail = client.get(f"/api/v1/assets/devices/{device['id']}").json()
+    assert len(detail["connections"][0]["activations"]) == 2
+
+    deployments = client.get("/api/v1/collector-deployments").json()
+    deployment_by_id = {item["id"]: item for item in deployments}
+    assert deployment_by_id[metrics_result["deployment"]["id"]]["enabled"] is False
+    assert deployment_by_id[topology_result["deployment"]["id"]]["enabled"] is True
+    assert replacement_result["activation"]["plan_hash"] != metrics_plan["plan_hash"]
+
+
 def test_activation_runtime_health_degradation_drift_and_approved_repair(client):
     artifact = publish_artifact(client, snmp_exporter_artifact_payload())
     device = onboard_snmp_device(client)
@@ -350,7 +633,7 @@ def test_activation_runtime_health_degradation_drift_and_approved_repair(client)
             "name": "lab-snmp-runtime-worker",
             "site": "LAB",
             "capabilities": ["snmp_exporter"],
-            "labels": {"environment": "lab"},
+            "labels": {"environment": "lab", "io_supervisor_v1": True},
         },
     ).json()
     headers = {"Authorization": f"Bearer {registration['access_token']}"}
@@ -364,6 +647,15 @@ def test_activation_runtime_health_degradation_drift_and_approved_repair(client)
     )
     assert claimed.status_code == 200, claimed.text
     assignment = claimed.json()[0]
+    admitted = client.post(
+        f"/api/v1/collector-runs/{assignment['run_id']}/admit",
+        headers=headers,
+        json={
+            "lease_token": assignment["lease_token"],
+            "assignment_sha256": assignment["assignment_sha256"],
+        },
+    )
+    assert admitted.status_code == 200, admitted.text
     completed = client.post(
         f"/api/v1/collector-runs/{assignment['run_id']}/complete",
         headers=headers,
@@ -388,6 +680,15 @@ def test_activation_runtime_health_degradation_drift_and_approved_repair(client)
         headers=headers,
         json={"max_assignments": 1, "lease_seconds": 60},
     ).json()[0]
+    admitted = client.post(
+        f"/api/v1/collector-runs/{second['run_id']}/admit",
+        headers=headers,
+        json={
+            "lease_token": second["lease_token"],
+            "assignment_sha256": second["assignment_sha256"],
+        },
+    )
+    assert admitted.status_code == 200, admitted.text
     failed = client.post(
         f"/api/v1/collector-runs/{second['run_id']}/complete",
         headers=headers,

@@ -20,5 +20,9 @@ On-demand diagnostics use the versioned `builtin-psrp-cim-diagnostics`
 artifact. Create an `on_demand` deployment with a deployment-scoped credential
 profile reference, then call its trigger endpoint. The adapter accepts only the
 fixed read-only operations published in that artifact, requires WinRM TLS, and
-fails closed until an external credential-provider-backed executor is attached
-to the worker. Arbitrary PowerShell is not accepted.
+uses the built-in credential-brokered PSRP transport. Install the Worker with
+the `windows` extra, add `psrp_cim` to its capabilities, configure target and
+port allowlists, and provide either a trusted WinRM certificate chain or
+`ICHECK_COLLECTOR_PSRP_CA_FILE`. Arbitrary PowerShell and insecure certificate
+verification are not accepted. `ICHECK_COLLECTOR_PSRP_CONFIGURATION_NAME` can
+select a constrained JEA endpoint.

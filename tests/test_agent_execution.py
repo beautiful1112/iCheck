@@ -1,13 +1,22 @@
 import json
 from datetime import timedelta
-
-from langgraph.checkpoint.memory import InMemorySaver
+import pytest
 
 from icheck.agent_schemas import AgentExecutionAssignment
-from icheck.agent_worker import execute_assignment
+from icheck.agent_worker import (
+    RemoteLeasedCheckpointHook,
+    execute_remote_assignment,
+)
+from icheck.collector_worker import ControlPlaneHTTPError
 from icheck.database import SessionLocal
-from icheck.langgraph_runtime import GraphDecision
+from icheck.langgraph_runtime import GraphDecision, initial_graph_state
 from icheck.models import AgentExecution, AgentWorker, Investigation, utcnow
+from icheck.models import (
+    InvestigationCheckpoint,
+    InvestigationEvidence,
+    InvestigationToolCall,
+)
+from icheck.builtin_agent_tools import ensure_builtin_agent_tools
 
 
 REGISTRATION_HEADERS = {
@@ -53,13 +62,18 @@ def configure_execution_route(client):
     assert route.status_code == 201, route.text
 
 
-def start_execution(client, *, title="Execution lifecycle"):
+def start_execution(
+    client,
+    *,
+    title="Execution lifecycle",
+    device_id="device-1",
+):
     created = client.post(
         "/api/v1/agent/investigations",
         json={
             "title": title,
             "objective": "Inspect the target without changing it.",
-            "scope": {"device_ids": ["device-1"]},
+            "scope": {"device_ids": [device_id]},
             "route_purpose": "investigation",
             "created_by": "l1.operator",
         },
@@ -96,6 +110,40 @@ def register_worker(client, name, *, capabilities=None):
 
 def bearer(token):
     return {"Authorization": f"Bearer {token}"}
+
+
+class RecordingAgentControlClient:
+    def __init__(self):
+        self.requests = []
+
+    def request(self, method, path, payload):
+        self.requests.append((method, path, payload))
+        if path.endswith("/lease"):
+            return {"cancellation_requested_at": None}
+        if path.endswith("/progress"):
+            return {
+                "event_type": f"graph.{payload['node']}",
+                "sequence": 3,
+            }
+        raise AssertionError(f"Unexpected Agent control request: {path}")
+
+
+class APIAgentControlClient:
+    def __init__(self, client, access_token):
+        self.client = client
+        self.access_token = access_token
+
+    def request(self, method, path, payload, **_kwargs):
+        response = self.client.request(
+            method,
+            path,
+            headers=bearer(self.access_token),
+            json=payload,
+        )
+        assert response.status_code < 400, response.text
+        if response.status_code == 204 or not response.content:
+            return None
+        return response.json()
 
 
 def test_agent_execution_claim_renew_cancel_and_ordered_events(client):
@@ -213,6 +261,399 @@ def test_agent_execution_claim_renew_cancel_and_ordered_events(client):
         "agent.execution.cancel_requested",
         "agent.execution.completed",
     } <= {item["event_type"] for item in audits}
+
+
+def test_cancel_rejects_after_product_terminal_commit_before_worker_ack(client):
+    configure_execution_route(client)
+    investigation, execution = start_execution(client, title="Committed before ack")
+    registration = register_worker(client, "agent-worker-committed-before-ack")
+    worker_id = registration["worker"]["id"]
+    headers = bearer(registration["access_token"])
+    assignment = client.post(
+        f"/api/v1/agent/workers/{worker_id}/executions/claim",
+        headers=headers,
+        json={"max_assignments": 1, "lease_seconds": 60},
+    ).json()[0]
+    with SessionLocal() as db:
+        stored = db.get(Investigation, investigation["id"])
+        stored.status = "completed"
+        stored.finished_at = utcnow()
+        db.commit()
+
+    cancellation = client.post(
+        f"/api/v1/agent/executions/{execution['id']}/cancel",
+        json={"actor": "l1.operator", "reason": "Too late to stop committed result"},
+    )
+    assert cancellation.status_code == 409
+    assert "already terminal" in cancellation.text
+    acknowledged = client.post(
+        f"/api/v1/agent/executions/{execution['id']}/complete",
+        headers=headers,
+        json={"lease_token": assignment["lease_token"], "status": "succeeded"},
+    )
+    assert acknowledged.status_code == 200, acknowledged.text
+    assert acknowledged.json()["status"] == "succeeded"
+    assert acknowledged.json()["cancellation_requested_at"] is None
+
+
+def test_accepted_cancellation_wins_over_stale_worker_success_and_progress(client):
+    configure_execution_route(client)
+    investigation, execution = start_execution(client, title="Cancellation wins")
+    registration = register_worker(client, "agent-worker-cancellation-wins")
+    worker_id = registration["worker"]["id"]
+    headers = bearer(registration["access_token"])
+    assignment = client.post(
+        f"/api/v1/agent/workers/{worker_id}/executions/claim",
+        headers=headers,
+        json={"max_assignments": 1, "lease_seconds": 60},
+    ).json()[0]
+    cancellation = client.post(
+        f"/api/v1/agent/executions/{execution['id']}/cancel",
+        json={"actor": "l1.operator", "reason": "Stop the current reasoning"},
+    )
+    assert cancellation.status_code == 200, cancellation.text
+    assert cancellation.json()["status"] == "running"
+    progress = client.post(
+        f"/api/v1/agent/executions/{execution['id']}/progress",
+        headers=headers,
+        json={
+            "lease_token": assignment["lease_token"],
+            "node": "reason",
+            "status": "running",
+            "iteration": 0,
+            "tokens_used": 0,
+            "tool_calls_used": 0,
+            "evidence_count": 0,
+        },
+    )
+    assert progress.status_code == 409
+    assert "cancellation was requested" in progress.text
+    completed = client.post(
+        f"/api/v1/agent/executions/{execution['id']}/complete",
+        headers=headers,
+        json={"lease_token": assignment["lease_token"], "status": "succeeded"},
+    )
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["status"] == "cancelled"
+    replay = client.post(
+        f"/api/v1/agent/executions/{execution['id']}/complete",
+        headers=headers,
+        json={"lease_token": assignment["lease_token"], "status": "succeeded"},
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == completed.json()
+    assert client.get(
+        f"/api/v1/agent/investigations/{investigation['id']}"
+    ).json()["status"] == "cancelled"
+    events = client.get(
+        f"/api/v1/agent/executions/{execution['id']}/events"
+    ).json()
+    assert events[-1]["payload"]["requested_status"] == "succeeded"
+    assert events[-1]["payload"]["status"] == "cancelled"
+
+
+def test_completion_response_loss_replay_is_bound_and_does_not_duplicate_events(client):
+    configure_execution_route(client)
+    investigation, execution = start_execution(client, title="Completion replay")
+    registration = register_worker(client, "agent-worker-completion-replay")
+    worker_id = registration["worker"]["id"]
+    headers = bearer(registration["access_token"])
+    claim = client.post(
+        f"/api/v1/agent/workers/{worker_id}/executions/claim",
+        headers=headers,
+        json={"max_assignments": 1, "lease_seconds": 60},
+    )
+    assert claim.status_code == 200, claim.text
+    lease_token = claim.json()[0]["lease_token"]
+    with SessionLocal() as db:
+        stored = db.get(Investigation, investigation["id"])
+        stored.status = "completed"
+        stored.finished_at = utcnow()
+        db.commit()
+
+    path = f"/api/v1/agent/executions/{execution['id']}/complete"
+    document = {"lease_token": lease_token, "status": "succeeded"}
+    first = client.post(path, headers=headers, json=document)
+    assert first.status_code == 200, first.text
+    assert "completion_token_hash" not in first.json()
+    assert "completion_request_hash" not in first.json()
+    replay = client.post(path, headers=headers, json=document)
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == first.json()
+    assert client.post(
+        path, headers=headers,
+        json={**document, "lease_token": "different-lease-token-long-enough"},
+    ).status_code == 409
+    assert client.post(
+        path, headers=headers,
+        json={**document, "status": "failed", "error": "changed-response"},
+    ).status_code == 409
+    another = register_worker(client, "agent-worker-completion-forger")
+    assert client.post(
+        path, headers=bearer(another["access_token"]), json=document,
+    ).status_code == 401
+    events = client.get(
+        f"/api/v1/agent/executions/{execution['id']}/events"
+    ).json()
+    assert [item["event_type"] for item in events].count("execution.completed") == 1
+    audits = client.get("/api/v1/audit-events?limit=1000").json()
+    assert sum(
+        item["event_type"] == "agent.execution.completed"
+        and item["entity_id"] == execution["id"]
+        for item in audits
+    ) == 1
+    with SessionLocal() as db:
+        stored_execution = db.get(AgentExecution, execution["id"])
+        assert stored_execution.lease_token_hash is None
+        assert stored_execution.completion_worker_id == worker_id
+        assert stored_execution.completion_token_hash is not None
+        assert stored_execution.completion_request_hash is not None
+
+
+def test_worker_progress_api_is_lease_bound_and_matches_persisted_state(client):
+    configure_execution_route(client)
+    investigation, execution = start_execution(client, title="Remote progress")
+    registration = register_worker(client, "agent-worker-remote-progress")
+    worker_id = registration["worker"]["id"]
+    headers = bearer(registration["access_token"])
+    claim = client.post(
+        f"/api/v1/agent/workers/{worker_id}/executions/claim",
+        headers=headers,
+        json={"max_assignments": 1, "lease_seconds": 60},
+    )
+    assignment = claim.json()[0]
+    progress = {
+        "lease_token": assignment["lease_token"],
+        "node": "reason",
+        "status": "running",
+        "iteration": 0,
+        "tokens_used": 0,
+        "tool_calls_used": 0,
+        "evidence_count": 0,
+    }
+
+    unauthorized = client.post(
+        f"/api/v1/agent/executions/{execution['id']}/progress",
+        json=progress,
+    )
+    assert unauthorized.status_code == 401
+    bad_node = client.post(
+        f"/api/v1/agent/executions/{execution['id']}/progress",
+        headers=headers,
+        json={**progress, "node": "untrusted-node"},
+    )
+    assert bad_node.status_code == 422
+    drifted = client.post(
+        f"/api/v1/agent/executions/{execution['id']}/progress",
+        headers=headers,
+        json={**progress, "tokens_used": 1},
+    )
+    assert drifted.status_code == 409
+    assert "persisted investigation state" in drifted.text
+
+    accepted = client.post(
+        f"/api/v1/agent/executions/{execution['id']}/progress",
+        headers=headers,
+        json=progress,
+    )
+    assert accepted.status_code == 200, accepted.text
+    event = accepted.json()
+    assert event["event_type"] == "graph.reason"
+    assert event["payload"] == {
+        "status": "running",
+        "iteration": 0,
+        "tokens_used": 0,
+        "tool_calls_used": 0,
+        "evidence_count": 0,
+    }
+    assert assignment["lease_token"] not in json.dumps(event)
+
+    completed = client.post(
+        f"/api/v1/agent/executions/{execution['id']}/complete",
+        headers=headers,
+        json={
+            "lease_token": assignment["lease_token"],
+            "status": "failed",
+            "error": "Test completed after progress contract validation.",
+        },
+    )
+    assert completed.status_code == 200
+    assert client.get(
+        f"/api/v1/agent/investigations/{investigation['id']}"
+    ).json()["status"] == "failed"
+
+
+def test_exact_replayed_worker_progress_does_not_duplicate_product_checkpoint(client):
+    configure_execution_route(client)
+    investigation, execution = start_execution(client, title="Replayed progress")
+    registration = register_worker(client, "agent-worker-replayed-progress")
+    headers = bearer(registration["access_token"])
+    claim = client.post(
+        f"/api/v1/agent/workers/{registration['worker']['id']}/executions/claim",
+        headers=headers,
+        json={"max_assignments": 1, "lease_seconds": 60},
+    )
+    assert claim.status_code == 200, claim.text
+    assignment = claim.json()[0]
+    state = initial_graph_state(
+        investigation_id=investigation["id"],
+        objective=investigation["objective"],
+        scope=investigation["scope"],
+        max_iterations=investigation["max_iterations"],
+        max_tool_calls=investigation["max_tool_calls"],
+        token_budget=investigation["token_budget"],
+    )
+    state.update(
+        current_node="reason",
+        iteration=1,
+        tokens_used=5,
+        plan=["Read the target"],
+    )
+    payload = {
+        "lease_token": assignment["lease_token"],
+        "node": "reason",
+        "status": "running",
+        "iteration": 1,
+        "tokens_used": 5,
+        "tool_calls_used": 0,
+        "evidence_count": 0,
+        "state": state,
+    }
+    url = f"/api/v1/agent/executions/{execution['id']}/progress"
+    first = client.post(url, headers=headers, json=payload)
+    second = client.post(url, headers=headers, json=payload)
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert "checkpoint_replayed" not in first.json()["payload"]
+    assert second.json()["payload"]["checkpoint_replayed"] is True
+    with SessionLocal() as db:
+        checkpoints = (
+            db.query(InvestigationCheckpoint)
+            .filter(InvestigationCheckpoint.investigation_id == investigation["id"])
+            .order_by(InvestigationCheckpoint.sequence)
+            .all()
+        )
+        assert [item.node for item in checkpoints] == ["start", "reason"]
+
+
+def test_runtime_protocol_is_lease_bound_and_rejects_thread_and_operation_tamper(
+    client,
+):
+    configure_execution_route(client)
+    investigation, execution = start_execution(client, title="Runtime security")
+    registration = register_worker(client, "agent-worker-runtime-security")
+    worker_id = registration["worker"]["id"]
+    headers = bearer(registration["access_token"])
+    claim = client.post(
+        f"/api/v1/agent/workers/{worker_id}/executions/claim",
+        headers=headers,
+        json={"max_assignments": 1, "lease_seconds": 60},
+    )
+    assignment = claim.json()[0]
+    bootstrap_payload = {
+        "protocol_version": "icheck.agent-runtime/v1",
+        "lease_token": assignment["lease_token"],
+    }
+
+    assert client.post(
+        f"/api/v1/agent/executions/{execution['id']}/runtime/bootstrap",
+        json=bootstrap_payload,
+    ).status_code == 401
+    assert client.post(
+        f"/api/v1/agent/executions/{execution['id']}/runtime/bootstrap",
+        headers=headers,
+        json={
+            **bootstrap_payload,
+            "lease_token": "invalid-runtime-lease-token",
+        },
+    ).status_code == 409
+
+    bootstrap = client.post(
+        f"/api/v1/agent/executions/{execution['id']}/runtime/bootstrap",
+        headers=headers,
+        json=bootstrap_payload,
+    )
+    assert bootstrap.status_code == 200, bootstrap.text
+    assert bootstrap.json()["protocol_version"] == "icheck.agent-runtime/v1"
+    assert bootstrap.json()["resume_required"] is False
+
+    wrong_thread = client.post(
+        (
+            f"/api/v1/agent/executions/{execution['id']}"
+            "/runtime/checkpoints/get"
+        ),
+        headers=headers,
+        json={
+            **bootstrap_payload,
+            "config": {
+                "configurable": {
+                    "thread_id": "another-investigation",
+                }
+            },
+        },
+    )
+    assert wrong_thread.status_code == 409
+    assert "does not match" in wrong_thread.text
+
+    tampered_reason = client.post(
+        f"/api/v1/agent/executions/{execution['id']}/runtime/reason",
+        headers=headers,
+        json={
+            **bootstrap_payload,
+            "operation_id": "0" * 64,
+            "state": bootstrap.json()["initial_state"],
+        },
+    )
+    assert tampered_reason.status_code == 409
+    assert "operation ID" in tampered_reason.text
+
+
+def test_remote_checkpoint_hook_renews_and_publishes_over_http(client):
+    configure_execution_route(client)
+    investigation, execution = start_execution(client, title="Remote hook")
+    registration = register_worker(client, "agent-worker-remote-hook")
+    worker_id = registration["worker"]["id"]
+    claim = client.post(
+        f"/api/v1/agent/workers/{worker_id}/executions/claim",
+        headers=bearer(registration["access_token"]),
+        json={"max_assignments": 1, "lease_seconds": 60},
+    )
+    assignment = AgentExecutionAssignment.model_validate(claim.json()[0])
+    remote = RecordingAgentControlClient()
+
+    with SessionLocal() as db:
+        stored_investigation = db.get(Investigation, investigation["id"])
+        assert stored_investigation is not None
+        state = initial_graph_state(
+            investigation_id=investigation["id"],
+            objective=investigation["objective"],
+            scope=investigation["scope"],
+            max_iterations=stored_investigation.max_iterations,
+            max_tool_calls=stored_investigation.max_tool_calls,
+            token_budget=stored_investigation.token_budget,
+        )
+    hook = RemoteLeasedCheckpointHook(
+        remote,
+        assignment,
+        lease_seconds=60,
+    )
+    hook("reason", state)
+
+    assert [item[1].rsplit("/", 1)[-1] for item in remote.requests] == [
+        "lease",
+        "progress",
+    ]
+    progress = remote.requests[1][2]
+    assert progress == {
+        "lease_token": assignment.lease_token,
+        "node": "reason",
+        "status": "running",
+        "iteration": 0,
+        "tokens_used": 0,
+        "tool_calls_used": 0,
+        "evidence_count": 0,
+        "state": state,
+    }
 
 
 def test_expired_execution_is_reassigned_and_signals_checkpoint_resume(client):
@@ -354,20 +795,18 @@ def test_standalone_worker_executes_claim_and_emits_graph_progress(
         )
 
     monkeypatch.setattr(
-        "icheck.agent_worker.OpenAICompatibleReasoner",
+        "icheck.services.agent_remote_runtime.OpenAICompatibleReasoner",
         lambda *_args, **_kwargs: reasoner,
     )
+    completed = execute_remote_assignment(
+        APIAgentControlClient(client, registration["access_token"]),
+        assignment,
+        lease_seconds=60,
+        credential_broker=None,
+        mcp_allowed_hosts=["mcp.example.test"],
+    )
+    assert completed["status"] == "succeeded"
     with SessionLocal() as db:
-        worker = db.get(AgentWorker, worker_id)
-        assert worker is not None
-        completed = execute_assignment(
-            db,
-            worker,
-            assignment,
-            checkpointer=InMemorySaver(),
-            lease_seconds=60,
-        )
-        assert completed.status.value == "succeeded"
         stored_investigation = db.get(Investigation, investigation["id"])
         assert stored_investigation is not None
         assert stored_investigation.status == "completed"
@@ -399,6 +838,202 @@ def test_standalone_worker_executes_claim_and_emits_graph_progress(
     assert "event: execution.completed" in stream.text
     assert "event: stream.end" in stream.text
     assert '"status":"succeeded"' in stream.text
+
+
+@pytest.mark.parametrize(
+    "lost_response",
+    [
+        TimeoutError("Completion committed, response dropped"),
+        ControlPlaneHTTPError(502, "upstream connection closed"),
+    ],
+)
+def test_worker_retries_identical_completion_after_committed_response_is_lost(
+    client, monkeypatch, lost_response,
+):
+    configure_execution_route(client)
+    investigation, execution = start_execution(client, title="Lost completion response")
+    registration = register_worker(client, "agent-worker-lost-completion-response")
+    claim = client.post(
+        f"/api/v1/agent/workers/{registration['worker']['id']}/executions/claim",
+        headers=bearer(registration["access_token"]),
+        json={"max_assignments": 1, "lease_seconds": 60},
+    )
+    assert claim.status_code == 200, claim.text
+    assignment = AgentExecutionAssignment.model_validate(claim.json()[0])
+
+    def reasoner(_state):
+        return GraphDecision(
+            action="complete",
+            plan=["Use existing evidence"],
+            confidence=0.9,
+            conclusion="No further diagnostic tool is required.",
+            uncertainty=["No live target was queried in this acceptance test."],
+            token_usage=25,
+        )
+
+    monkeypatch.setattr(
+        "icheck.services.agent_remote_runtime.OpenAICompatibleReasoner",
+        lambda *_args, **_kwargs: reasoner,
+    )
+
+    class LostCompletionResponseClient(APIAgentControlClient):
+        completion_documents = []
+
+        def request(self, method, path, payload, **kwargs):
+            result = super().request(method, path, payload, **kwargs)
+            if path.endswith("/complete"):
+                self.completion_documents.append(payload.copy())
+                if len(self.completion_documents) == 1:
+                    raise lost_response
+            return result
+
+    transport = LostCompletionResponseClient(client, registration["access_token"])
+    completed = execute_remote_assignment(
+        transport,
+        assignment,
+        lease_seconds=60,
+        credential_broker=None,
+        mcp_allowed_hosts=["mcp.example.test"],
+    )
+    assert completed["status"] == "succeeded"
+    assert len(transport.completion_documents) == 2
+    assert transport.completion_documents[0] == transport.completion_documents[1]
+    assert client.get(
+        f"/api/v1/agent/investigations/{investigation['id']}"
+    ).json()["status"] == "completed"
+    events = client.get(
+        f"/api/v1/agent/executions/{execution['id']}/events"
+    ).json()
+    assert [item["event_type"] for item in events].count("execution.completed") == 1
+
+
+def test_http_only_worker_runs_reason_tool_evidence_loop(client, monkeypatch):
+    configure_execution_route(client)
+    device = client.post(
+        "/api/v1/assets/devices",
+        json={
+            "name": "remote-runtime-switch",
+            "kind": "switch",
+            "management_ip": "192.0.2.88",
+            "site": "LAB",
+            "connections": [
+                {
+                    "protocol": "icmp",
+                    "configuration": {"probe_timeout_seconds": 2},
+                }
+            ],
+            "created_by": "l1.operator",
+        },
+    )
+    assert device.status_code == 201, device.text
+    device_id = device.json()["id"]
+    investigation, execution = start_execution(
+        client,
+        title="Remote Tool execution",
+        device_id=device_id,
+    )
+    with SessionLocal() as db:
+        ensure_builtin_agent_tools(db)
+
+    registration = register_worker(client, "agent-worker-runtime-tool")
+    claim = client.post(
+        (
+            f"/api/v1/agent/workers/{registration['worker']['id']}"
+            "/executions/claim"
+        ),
+        headers=bearer(registration["access_token"]),
+        json={"max_assignments": 1, "lease_seconds": 60},
+    )
+    assignment = AgentExecutionAssignment.model_validate(claim.json()[0])
+    reason_calls = []
+
+    def reasoner(state):
+        reason_calls.append(dict(state))
+        if not state["tool_results"]:
+            return GraphDecision(
+                action="continue",
+                plan=["Read the device", "Evaluate the evidence"],
+                tool_requests=[
+                    {
+                        "tool_name": "inventory.get_device",
+                        "arguments": {"device_id": device_id},
+                        "purpose": "Read the bounded device state",
+                    }
+                ],
+                token_usage=30,
+            )
+        assert state["tool_results"][0]["result"]["id"] == device_id
+        return GraphDecision(
+            action="complete",
+            plan=state["plan"],
+            confidence=0.95,
+            conclusion="The device is registered and awaiting live verification.",
+            uncertainty=["No live collector run has completed."],
+            token_usage=20,
+        )
+
+    monkeypatch.setattr(
+        "icheck.services.agent_remote_runtime.OpenAICompatibleReasoner",
+        lambda *_args, **_kwargs: reasoner,
+    )
+    completed = execute_remote_assignment(
+        APIAgentControlClient(client, registration["access_token"]),
+        assignment,
+        lease_seconds=60,
+        credential_broker=None,
+        mcp_allowed_hosts=["mcp.example.test"],
+    )
+    assert completed["status"] == "succeeded"
+    assert len(reason_calls) == 2
+
+    with SessionLocal() as db:
+        stored = db.get(Investigation, investigation["id"])
+        assert stored is not None
+        assert stored.status == "completed"
+        assert stored.iterations_used == 2
+        assert stored.tool_calls_used == 1
+        assert stored.tokens_used == 50
+        checkpoints = (
+            db.query(InvestigationCheckpoint)
+            .filter(
+                InvestigationCheckpoint.investigation_id == investigation["id"]
+            )
+            .order_by(InvestigationCheckpoint.sequence)
+            .all()
+        )
+        assert [item.node for item in checkpoints] == [
+            "start",
+            "reason",
+            "tools",
+            "reason",
+        ]
+        calls = (
+            db.query(InvestigationToolCall)
+            .filter(InvestigationToolCall.investigation_id == investigation["id"])
+            .all()
+        )
+        evidence = (
+            db.query(InvestigationEvidence)
+            .filter(InvestigationEvidence.investigation_id == investigation["id"])
+            .all()
+        )
+        assert len(calls) == 1
+        assert calls[0].status == "succeeded"
+        assert len(evidence) == 1
+        assert evidence[0].evidence_id == device_id
+
+    events = client.get(
+        f"/api/v1/agent/executions/{execution['id']}/events"
+    ).json()
+    assert [item["event_type"] for item in events] == [
+        "execution.queued",
+        "execution.claimed",
+        "graph.reason",
+        "graph.tools",
+        "graph.reason",
+        "graph.finalize",
+        "execution.completed",
+    ]
 
 
 def test_scheduler_reconciles_terminal_graph_commit_after_worker_crash(client):

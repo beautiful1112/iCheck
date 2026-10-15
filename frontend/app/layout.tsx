@@ -1,10 +1,12 @@
 import type { Metadata } from "next";
+import SessionBoundary from "./session-boundary";
+import SkipToMain from "./skip-to-main";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "iCheck · Infrastructure Operations",
   description: "AI-native infrastructure monitoring, identity, alerts, and operations.",
-  other: {
+  other: process.env.ICHECK_FRONTEND_TARGET === "native" ? {} : {
     "codex-preview": "development",
   },
   icons: {
@@ -20,7 +22,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className="antialiased">{children}</body>
+      <body className="antialiased"><SkipToMain /><SessionBoundary>{children}</SessionBoundary></body>
     </html>
   );
 }

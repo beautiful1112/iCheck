@@ -1,0 +1,34 @@
+[Unit]
+Description=Nginx for iCheck Engineering Preview HTTPS and local worker mTLS
+After=network-online.target icheck-control-plane.service icheck-frontend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+UMask=0077
+ExecStartPre=/usr/sbin/nginx -t -c /etc/icheck-preview-ingress/nginx.conf
+ExecStart=/usr/sbin/nginx -c /etc/icheck-preview-ingress/nginx.conf -g "daemon off;"
+KillSignal=SIGQUIT
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+StateDirectory=icheck-preview-ingress
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/icheck-preview-ingress
+MemoryMax=256M
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

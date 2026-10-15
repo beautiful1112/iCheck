@@ -30,7 +30,7 @@
   --secondary: #ebedef;
   --secondary-foreground: #4f5d73;
   --muted: #ebedef;
-  --muted-foreground: #768192;
+  --muted-foreground: #536176;
   --accent: #e9e8fb;
   --accent-foreground: #3c3a9f;
   --destructive: #e55353;
@@ -51,6 +51,10 @@
   --sidebar-accent-foreground: #ffffff;
   --sidebar-border: #3c4b64;
   --sidebar-ring: #7a79df;
+}
+
+[data-text-surface="dark"] {
+  --muted-foreground: #b8c3d4;
 }
 
 @theme inline {

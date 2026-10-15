@@ -5,13 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=icheck
-Group=icheck
-ExecStart=/opt/icheck/bin/prometheus --config.file=/etc/icheck/prometheus/prometheus.yml --storage.tsdb.path=/var/lib/icheck/prometheus --storage.tsdb.retention.time=15d --storage.tsdb.retention.size=10GB --web.listen-address=127.0.0.1:9090
+User=icheck-prometheus
+Group=icheck-prometheus
+ExecStart=/opt/icheck/bin/prometheus --config.file=/etc/icheck-workers/prometheus/prometheus.yml --storage.tsdb.path=/var/lib/icheck-prometheus --storage.tsdb.retention.time=15d --storage.tsdb.retention.size=10GB --web.listen-address=127.0.0.1:9090
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
-UMask=0027
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -19,7 +19,9 @@ ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-ReadWritePaths=/var/lib/icheck/prometheus
+StateDirectory=icheck-prometheus
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/icheck-prometheus
 
 [Install]
 WantedBy=multi-user.target

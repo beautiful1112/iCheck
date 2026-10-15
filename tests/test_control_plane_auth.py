@@ -13,6 +13,7 @@ from icheck.models import (
     AuditEvent,
     AgentToolRegistration,
     ControlPlaneAccessToken,
+    ControlPlaneBrowserSession,
     ControlPlaneRole,
     Investigation,
 )
@@ -31,6 +32,35 @@ def test_production_cannot_disable_control_plane_authentication():
         Settings(
             environment="production",
             control_plane_auth_mode="disabled",
+        )
+
+
+def test_production_requires_governed_change_contracts():
+    with pytest.raises(ValueError, match="GOVERNED_CHANGE_CONTRACTS"):
+        Settings(
+            environment="production",
+            control_plane_auth_mode="required",
+            control_plane_session_cookie_secure=True,
+            require_governed_change_contracts=False,
+        )
+    settings = Settings(
+        environment="production",
+        control_plane_auth_mode="required",
+        control_plane_session_cookie_secure=True,
+        require_governed_change_contracts=True,
+        auto_create_schema=False,
+    )
+    assert settings.require_governed_change_contracts is True
+
+
+def test_production_never_initializes_application_schema_at_runtime():
+    with pytest.raises(ValueError, match="AUTO_CREATE_SCHEMA=false"):
+        Settings(
+            environment="production",
+            control_plane_auth_mode="required",
+            control_plane_session_cookie_secure=True,
+            require_governed_change_contracts=True,
+            auto_create_schema=True,
         )
 
 
@@ -56,6 +86,11 @@ def test_disabled_mode_exposes_explicit_development_principal(client):
         "role_names": ["development-admin"],
         "authorization_scope": {"all": True},
         "auth_method": "disabled",
+        "tenant_id": "00000000-0000-0000-0000-000000000001",
+        "tenant_slug": "local",
+        "region_id": "00000000-0000-0000-0000-000000000002",
+        "region_code": "primary",
+        "platform_admin": True,
     }
 
 
@@ -147,6 +182,13 @@ def test_required_mode_bootstrap_rbac_issue_and_revoke(client, monkeypatch):
             json={"subject": "denied", "display_name": "Denied"},
         )
         assert forbidden.status_code == 403
+        assert (
+            client.get(
+                "/api/v1/mcp/fleet/telemetry",
+                headers=viewer_headers,
+            ).status_code
+            == 403
+        )
 
         revoked = client.post(
             f"/api/v1/auth/tokens/{viewer_token_id}/revoke",
@@ -176,6 +218,285 @@ def test_required_mode_bootstrap_rbac_issue_and_revoke(client, monkeypatch):
             )
         assert admin_token not in audit_document
         assert viewer_token not in audit_document
+    finally:
+        _restore_disabled_auth(monkeypatch)
+
+
+def test_principal_disable_and_role_revocation_are_immediate_and_audited(
+    client,
+    monkeypatch,
+):
+    _required_auth(monkeypatch)
+    try:
+        bootstrap = client.post(
+            "/api/v1/auth/bootstrap",
+            headers=BOOTSTRAP_HEADERS,
+            json={
+                "subject": "lifecycle.admin@example.test",
+                "display_name": "Lifecycle Admin",
+            },
+        )
+        assert bootstrap.status_code == 201, bootstrap.text
+        admin_id = bootstrap.json()["principal"]["id"]
+        admin_token = bootstrap.json()["token"]["access_token"]
+        admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+        roles = client.get("/api/v1/auth/roles", headers=admin_headers)
+        viewer_role = next(role for role in roles.json() if role["name"] == "viewer")
+        principal = client.post(
+            "/api/v1/auth/principals",
+            headers=admin_headers,
+            json={
+                "subject": "lifecycle.viewer@example.test",
+                "display_name": "Lifecycle Viewer",
+            },
+        )
+        assert principal.status_code == 201, principal.text
+        principal_id = principal.json()["id"]
+        binding = client.post(
+            f"/api/v1/auth/principals/{principal_id}/bindings",
+            headers=admin_headers,
+            json={"role_id": viewer_role["id"], "scope": {"all": True}},
+        )
+        assert binding.status_code == 201, binding.text
+        binding_id = binding.json()["id"]
+        issued = client.post(
+            f"/api/v1/auth/principals/{principal_id}/tokens",
+            headers=admin_headers,
+            json={"name": "lifecycle", "expires_in_hours": 24},
+        )
+        assert issued.status_code == 201, issued.text
+        viewer_token = issued.json()["access_token"]
+        viewer_headers = {"Authorization": f"Bearer {viewer_token}"}
+        browser = client.post(
+            "/api/v1/auth/browser-sessions",
+            headers=viewer_headers,
+        )
+        assert browser.status_code == 201, browser.text
+
+        removed = client.post(
+            f"/api/v1/auth/bindings/{binding_id}/revoke",
+            headers=admin_headers,
+            json={"reason": "Remove obsolete viewer access."},
+        )
+        assert removed.status_code == 204, removed.text
+        after_binding = client.get("/api/v1/auth/me", headers=viewer_headers)
+        assert after_binding.status_code == 200, after_binding.text
+        assert after_binding.json()["permissions"] == []
+        assert after_binding.json()["authorization_scope"] == {}
+
+        self_bindings = client.get(
+            f"/api/v1/auth/principals/{admin_id}/bindings",
+            headers=admin_headers,
+        )
+        assert self_bindings.status_code == 200, self_bindings.text
+        self_revoke = client.post(
+            f"/api/v1/auth/bindings/{self_bindings.json()[0]['id']}/revoke",
+            headers=admin_headers,
+            json={"reason": "Unsafe self revocation."},
+        )
+        assert self_revoke.status_code == 409
+
+        disabled = client.patch(
+            f"/api/v1/auth/principals/{principal_id}",
+            headers=admin_headers,
+            json={"enabled": False, "reason": "Offboarding complete."},
+        )
+        assert disabled.status_code == 200, disabled.text
+        assert disabled.json()["enabled"] is False
+        assert client.get("/api/v1/auth/me", headers=viewer_headers).status_code == 401
+        denied_issue = client.post(
+            f"/api/v1/auth/principals/{principal_id}/tokens",
+            headers=admin_headers,
+            json={"name": "must-not-issue", "expires_in_hours": 24},
+        )
+        assert denied_issue.status_code == 409
+
+        with SessionLocal() as db:
+            token = db.get(ControlPlaneAccessToken, issued.json()["token"]["id"])
+            assert token is not None
+            assert token.revoked_at is not None
+            assert token.revocation_reason == "principal_disabled"
+            session = db.scalar(
+                select(ControlPlaneBrowserSession).where(
+                    ControlPlaneBrowserSession.principal_id == principal_id
+                )
+            )
+            assert session is not None
+            assert session.revoked_at is not None
+            assert session.revocation_reason_sha256 == hash_token(
+                "Offboarding complete."
+            )
+            events = {
+                event.event_type
+                for event in db.scalars(
+                    select(AuditEvent).where(
+                        AuditEvent.entity_id.in_([principal_id, binding_id])
+                    )
+                ).all()
+            }
+            assert "auth.principal.updated" in events
+            assert "auth.role_binding.revoked" in events
+
+        reenabled = client.patch(
+            f"/api/v1/auth/principals/{principal_id}",
+            headers=admin_headers,
+            json={"enabled": True, "reason": "Account restored after review."},
+        )
+        assert reenabled.status_code == 200, reenabled.text
+        assert reenabled.json()["enabled"] is True
+        assert client.get("/api/v1/auth/me", headers=viewer_headers).status_code == 401
+        replacement = client.post(
+            f"/api/v1/auth/principals/{principal_id}/tokens",
+            headers=admin_headers,
+            json={"name": "replacement", "expires_in_hours": 24},
+        )
+        assert replacement.status_code == 201, replacement.text
+
+        self_disable = client.patch(
+            f"/api/v1/auth/principals/{admin_id}",
+            headers=admin_headers,
+            json={"enabled": False, "reason": "Unsafe self disable."},
+        )
+        assert self_disable.status_code == 409
+    finally:
+        _restore_disabled_auth(monkeypatch)
+
+
+def test_browser_session_is_http_only_csrf_protected_and_revocable(
+    client,
+    monkeypatch,
+):
+    _required_auth(monkeypatch)
+    try:
+        bootstrap = client.post(
+            "/api/v1/auth/bootstrap",
+            headers=BOOTSTRAP_HEADERS,
+            json={
+                "subject": "browser.admin@example.test",
+                "display_name": "Browser Admin",
+            },
+        )
+        bearer = bootstrap.json()["token"]["access_token"]
+        issued = client.post(
+            "/api/v1/auth/browser-sessions",
+            headers={"Authorization": f"Bearer {bearer}"},
+        )
+        assert issued.status_code == 201, issued.text
+        assert issued.json()["principal"]["subject"] == "browser.admin@example.test"
+        csrf = issued.json()["csrf_token"]
+        cookie = issued.headers["set-cookie"]
+        assert "icheck_session=" in cookie
+        assert "HttpOnly" in cookie
+        assert "SameSite=strict" in cookie
+
+        me = client.get("/api/v1/auth/me")
+        assert me.status_code == 200, me.text
+        assert me.json()["auth_method"] == "browser_session"
+
+        missing_csrf = client.post(
+            "/api/v1/auth/principals",
+            json={"subject": "no.csrf", "display_name": "No CSRF"},
+        )
+        assert missing_csrf.status_code == 403
+
+        created = client.post(
+            "/api/v1/auth/principals",
+            headers={"X-Icheck-CSRF-Token": csrf},
+            json={
+                "subject": "csrf.accepted@example.test",
+                "display_name": "CSRF Accepted",
+            },
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["created_by"] == "browser.admin@example.test"
+
+        rotated = client.get("/api/v1/auth/browser-sessions/current/csrf")
+        assert rotated.status_code == 200, rotated.text
+        next_csrf = rotated.json()["csrf_token"]
+        assert next_csrf != csrf
+        stale = client.post(
+            "/api/v1/auth/principals",
+            headers={"X-Icheck-CSRF-Token": csrf},
+            json={"subject": "stale.csrf", "display_name": "Stale CSRF"},
+        )
+        assert stale.status_code == 403
+
+        closed = client.delete(
+            "/api/v1/auth/browser-sessions/current",
+            headers={"X-Icheck-CSRF-Token": next_csrf},
+        )
+        assert closed.status_code == 204, closed.text
+        assert client.get("/api/v1/auth/me").status_code == 401
+    finally:
+        _restore_disabled_auth(monkeypatch)
+
+
+def test_admin_can_list_and_revoke_redacted_browser_session(
+    client,
+    monkeypatch,
+):
+    _required_auth(monkeypatch)
+    try:
+        bootstrap = client.post(
+            "/api/v1/auth/bootstrap",
+            headers=BOOTSTRAP_HEADERS,
+            json={
+                "subject": "session.admin@example.test",
+                "display_name": "Session Admin",
+            },
+        )
+        bearer = bootstrap.json()["token"]["access_token"]
+        admin_headers = {"Authorization": f"Bearer {bearer}"}
+        issued = client.post(
+            "/api/v1/auth/browser-sessions",
+            headers=admin_headers,
+        )
+        assert issued.status_code == 201, issued.text
+
+        sessions = client.get(
+            "/api/v1/auth/browser-sessions",
+            params={"active": True},
+            headers=admin_headers,
+        )
+        assert sessions.status_code == 200, sessions.text
+        assert len(sessions.json()) == 1
+        session = sessions.json()[0]
+        assert session["auth_source"] == "local_token"
+        assert session["federated_identity_id"] is None
+        assert "token_hash" not in session
+        assert "csrf_token_hash" not in session
+
+        revoked = client.post(
+            f"/api/v1/auth/browser-sessions/{session['id']}/revoke",
+            headers=admin_headers,
+            json={"reason": "Security response."},
+        )
+        assert revoked.status_code == 200, revoked.text
+        assert revoked.json()["revoked_at"] is not None
+        assert revoked.json()["revoked_by"] == "session.admin@example.test"
+        assert revoked.json()["revocation_reason_sha256"] == hash_token(
+            "Security response."
+        )
+        assert client.get("/api/v1/auth/me").status_code == 401
+
+        reissued = client.post(
+            "/api/v1/auth/browser-sessions",
+            headers=admin_headers,
+        )
+        assert reissued.status_code == 201, reissued.text
+        bulk = client.post(
+            (
+                f"/api/v1/auth/principals/"
+                f"{bootstrap.json()['principal']['id']}"
+                "/browser-sessions/revoke"
+            ),
+            headers=admin_headers,
+            json={"reason": "Terminate all sessions."},
+        )
+        assert bulk.status_code == 200, bulk.text
+        assert bulk.json()["revoked_count"] == 1
+        assert client.get("/api/v1/auth/me").status_code == 401
     finally:
         _restore_disabled_auth(monkeypatch)
 
@@ -298,9 +619,17 @@ def test_investigation_uses_immutable_server_side_permission_snapshot(
             investigation = db.get(Investigation, snapshot["id"])
             assert investigation is not None
             reasoner = OpenAICompatibleReasoner(db, investigation)
-            assert {tool["name"] for tool in reasoner.tool_catalog} == {
-                "inventory.get_device"
-            }
+            names = {tool["name"] for tool in reasoner.tool_catalog}
+            assert {
+                "inventory.get_device",
+                "knowledge.find_paths",
+                "knowledge.query_graph",
+            } <= names
+            assert "alerts.list_open" not in names
+            # Plugin additions remain bounded by the immutable permission snapshot,
+            # including after the current human role expands.
+            assert all(set(tool["required_permissions"]) <= set(snapshot["permission_snapshot"])
+                for tool in reasoner.tool_catalog)
             alert_tool = db.scalar(
                 select(AgentToolRegistration).where(
                     AgentToolRegistration.name == "alerts.list_open"

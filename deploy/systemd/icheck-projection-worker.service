@@ -1,0 +1,31 @@
+[Unit]
+Description=iCheck normalized-envelope knowledge projection worker
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=icheck-projection
+Group=icheck-projection
+UMask=0077
+WorkingDirectory=/opt/icheck
+EnvironmentFile=/etc/icheck/projection-worker.env
+ExecStart=/opt/icheck/.venv/bin/icheck-projection-worker
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StateDirectory=icheck-projection
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/icheck-projection
+
+[Install]
+WantedBy=multi-user.target

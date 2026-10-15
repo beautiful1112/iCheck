@@ -1,0 +1,40 @@
+{
+  "contract": "icheck.ansible-catalog/v1",
+  "project_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "inventory": {
+    "path": "hosts.yml",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "operations": [
+    {
+      "operation_id": "network.interface_description",
+      "description": "Set and verify one interface description through a reviewed playbook pack.",
+      "allowed_targets": ["00000000-0000-4000-8000-000000000001"],
+      "parameters_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["interface_name", "description"],
+        "properties": {
+          "interface_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9/_.-]+$"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "playbooks": {
+        "precheck": "network/interface_description_precheck.yml",
+        "apply": "network/interface_description_apply.yml",
+        "postcheck": "network/interface_description_postcheck.yml",
+        "rollback": "network/interface_description_rollback.yml"
+      },
+      "timeout_seconds": 300
+    }
+  ]
+}

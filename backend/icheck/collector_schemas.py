@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from .models import (
     ArtifactKind,
@@ -82,6 +82,7 @@ class ArtifactVersionRead(APIModel):
     definition: dict[str, Any]
     implementation: dict[str, Any]
     tests: list[dict[str, Any]]
+    validation_report: dict[str, Any]
     content_hash: str | None
     created_by: str
     created_at: datetime
@@ -108,9 +109,182 @@ class ArtifactAction(APIModel):
     actor: str = Field(min_length=1, max_length=255)
 
 
+class ArtifactBundleModel(APIModel):
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+
+class ArtifactBundleIdentity(ArtifactBundleModel):
+    name: str = Field(min_length=1, max_length=255)
+    kind: ArtifactKind
+    description: str = Field(default="", max_length=10000)
+    labels: dict[str, Any] = Field(default_factory=dict)
+
+
+class ArtifactBundleVersion(ArtifactBundleModel):
+    definition: dict[str, Any] = Field(default_factory=dict)
+    implementation: dict[str, Any] = Field(default_factory=dict)
+    tests: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    collector_definition: CollectorDefinitionInput | None = None
+
+
+class ArtifactBundleSource(ArtifactBundleModel):
+    artifact_id: str = Field(min_length=1, max_length=128)
+    version_id: str = Field(min_length=1, max_length=128)
+    version: int = Field(ge=1)
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ArtifactExportBundle(ArtifactBundleModel):
+    format_version: Literal["icheck.artifact.bundle/v1"]
+    artifact: ArtifactBundleIdentity
+    version: ArtifactBundleVersion
+    source: ArtifactBundleSource
+    digest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ArtifactImportCreate(ArtifactBundleModel):
+    bundle: ArtifactExportBundle
+    name_override: str | None = Field(default=None, min_length=1, max_length=255)
+    created_by: str = Field(min_length=1, max_length=255)
+
+
+class ArtifactBundleSignature(ArtifactBundleModel):
+    algorithm: Literal["ed25519"]
+    key_fingerprint_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    signed_digest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    signature_base64: str = Field(min_length=80, max_length=128)
+
+
+class ArtifactSignedBundle(ArtifactBundleModel):
+    format_version: Literal["icheck.artifact.signed-bundle/v1"]
+    bundle: ArtifactExportBundle
+    signature: ArtifactBundleSignature
+
+
+class ArtifactSignedImportCreate(ArtifactBundleModel):
+    signed_bundle: ArtifactSignedBundle
+    name_override: str | None = Field(default=None, min_length=1, max_length=255)
+    created_by: str = Field(min_length=1, max_length=255)
+
+
+class ArtifactTrustKeyCreate(ArtifactBundleModel):
+    name: str = Field(
+        min_length=1,
+        max_length=255,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    public_key_pem: str = Field(min_length=64, max_length=4096)
+    purposes: list[
+        Literal[
+            "artifact_bundle",
+            "capability_pack",
+            "capability_revocation",
+            "remote_catalog",
+            "transparency_witness",
+            "trust_bundle",
+            "environment_promotion",
+            "trust_recovery",
+            "snmp_exporter_attestation",
+        ]
+    ] = Field(
+        default_factory=lambda: [
+            "artifact_bundle",
+            "capability_pack",
+            "capability_revocation",
+            "remote_catalog",
+            "trust_bundle",
+        ],
+        min_length=1,
+        max_length=9,
+    )
+    valid_from: datetime | None = None
+    expires_at: datetime | None = None
+    created_by: str = Field(min_length=1, max_length=255)
+
+    @model_validator(mode="after")
+    def validate_trust_key(self) -> "ArtifactTrustKeyCreate":
+        if len(set(self.purposes)) != len(self.purposes):
+            raise ValueError("Artifact trust-key purposes must be unique")
+        if self.valid_from is not None and self.valid_from.tzinfo is None:
+            raise ValueError("Artifact trust-key valid_from requires an offset")
+        if self.expires_at is not None and self.expires_at.tzinfo is None:
+            raise ValueError("Artifact trust-key expires_at requires an offset")
+        if (
+            self.valid_from is not None
+            and self.expires_at is not None
+            and self.expires_at <= self.valid_from
+        ):
+            raise ValueError("Artifact trust-key expiry must follow valid_from")
+        return self
+
+
+class ArtifactTrustKeyRead(ArtifactBundleModel):
+    id: str
+    name: str
+    algorithm: str
+    public_key_pem: str
+    fingerprint_sha256: str
+    enabled: bool
+    purposes: list[str]
+    trust_source: str
+    trust_domain_id: str | None
+    managed_bundle_sequence: int | None
+    valid_from: datetime | None
+    expires_at: datetime | None
+    created_by: str
+    created_at: datetime
+    revoked_at: datetime | None
+    revoked_by: str | None
+
+
+class ArtifactTrustKeyAction(ArtifactBundleModel):
+    actor: str = Field(min_length=1, max_length=255)
+
+
+class ArtifactSignatureVerificationRead(ArtifactBundleModel):
+    id: str
+    artifact_version_id: str
+    trust_key_id: str
+    algorithm: str
+    key_fingerprint_sha256: str
+    bundle_digest_sha256: str
+    signature_sha256: str
+    verified_by: str
+    verified_at: datetime
+
+
+class ArtifactSemanticChange(ArtifactBundleModel):
+    path: str = Field(min_length=1, max_length=2048)
+    change_type: Literal["added", "removed", "changed"]
+    before: Any = None
+    after: Any = None
+
+
+class ArtifactVersionDiffRead(ArtifactBundleModel):
+    artifact_id: str
+    from_version: int
+    to_version: int
+    from_content_hash: str | None
+    to_content_hash: str | None
+    change_count: int
+    truncated: bool
+    changes: list[ArtifactSemanticChange]
+
+
+class ArtifactRestoreCreate(ArtifactBundleModel):
+    source_version: int = Field(ge=1)
+    reason: str = Field(min_length=3, max_length=4000)
+    actor: str = Field(min_length=1, max_length=255)
+
+
 class CollectorDeploymentCreate(APIModel):
     name: str = Field(min_length=1, max_length=255)
     artifact_version_id: str
+    scope_device_id: str | None = Field(default=None, max_length=36)
+    scope_device_identity_revision: int | None = Field(default=None, ge=1)
+    target_classification: Literal["registered_device", "external_source"] | None = None
+    external_source_reason: str | None = Field(default=None, min_length=10, max_length=1000)
+    scope_site: str | None = Field(default=None, max_length=128)
     target: dict[str, Any] = Field(default_factory=dict)
     configuration: dict[str, Any] = Field(default_factory=dict)
     worker_selector: dict[str, str] = Field(default_factory=dict)
@@ -141,6 +315,11 @@ class CollectorDeploymentRead(APIModel):
     id: str
     name: str
     artifact_version_id: str
+    scope_device_id: str | None
+    scope_device_identity_revision: int | None
+    target_classification: str | None
+    external_source_reason: str | None
+    scope_site: str | None
     target: dict[str, Any]
     configuration: dict[str, Any]
     worker_selector: dict[str, str]
@@ -186,6 +365,12 @@ class CollectorWorkerRead(APIModel):
     capabilities: list[str]
     labels: dict[str, Any]
     state: CollectorWorkerState
+    mtls_fingerprint_sha256: str | None
+    mtls_not_after: datetime | None
+    mtls_next_fingerprint_sha256: str | None
+    mtls_next_not_before: datetime | None
+    mtls_next_not_after: datetime | None
+    mtls_revision: int
     last_heartbeat_at: datetime
     created_at: datetime
     updated_at: datetime
@@ -214,6 +399,13 @@ class CredentialProfileCreate(APIModel):
         return list(dict.fromkeys(normalized))
 
 
+class CredentialProfileRotate(APIModel):
+    expected_revision: int = Field(ge=0)
+    secret_ref: str = Field(min_length=1, max_length=1024)
+    reason: str = Field(min_length=1, max_length=4000)
+    actor: str = Field(min_length=1, max_length=255)
+
+
 class CredentialProfileRead(APIModel):
     id: str
     name: str
@@ -222,6 +414,7 @@ class CredentialProfileRead(APIModel):
     allowed_adapters: list[str]
     worker_selector: dict[str, str]
     enabled: bool
+    revision: int
     created_by: str
     created_at: datetime
     updated_at: datetime
@@ -252,6 +445,7 @@ class CollectorDeploymentTrigger(APIModel):
 class CollectorAssignment(APIModel):
     run_id: str
     lease_token: str
+    assignment_sha256: str = Field(min_length=64, max_length=64)
     lease_expires_at: datetime
     deployment_id: str
     deployment_name: str
@@ -275,6 +469,26 @@ class CollectorLeaseRenew(APIModel):
     lease_seconds: int = Field(default=60, ge=15, le=3600)
 
 
+class CollectorRunAdmit(APIModel):
+    lease_token: str = Field(min_length=20, max_length=512)
+    assignment_sha256: str = Field(min_length=64, max_length=64)
+
+
+class CredentialGrantRequest(APIModel):
+    lease_token: str = Field(min_length=20, max_length=512)
+
+
+class CredentialGrantRead(APIModel):
+    profile_id: str
+    profile_name: str
+    provider: str
+    secret_ref: str
+    adapter_type: str
+    deployment_id: str
+    expires_at: datetime
+    profile_revision: int
+
+
 class CollectorRunComplete(APIModel):
     lease_token: str = Field(min_length=20, max_length=512)
     status: CollectorRunStatus
@@ -293,8 +507,10 @@ class CollectorRunComplete(APIModel):
 class CollectorRunRead(APIModel):
     id: str
     deployment_id: str
+    artifact_version_id: str | None
     worker_id: str
     status: CollectorRunStatus
+    execution_admitted_at: datetime | None
     started_at: datetime
     finished_at: datetime | None
     records_received: int

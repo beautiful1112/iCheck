@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import json
+import re
 from datetime import UTC, datetime
 from typing import Any
 from urllib.error import HTTPError
@@ -74,13 +76,53 @@ class _NoRedirect(HTTPRedirectHandler):
         )
 
 
-def collect_http_json(assignment: dict[str, Any]) -> list[dict[str, Any]]:
-    """Collect an unauthenticated JSON endpoint into normalized envelopes.
+SAFE_HEADER = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,63}$")
+FORBIDDEN_CREDENTIAL_HEADERS = {
+    "connection",
+    "content-length",
+    "host",
+    "proxy-authorization",
+    "transfer-encoding",
+}
 
-    Authentication is intentionally unavailable until the credential broker is
-    implemented. The deployment may contain a credential reference, but never a
-    literal token, password, or Authorization header.
-    """
+
+def _credential_headers(
+    credential: dict[str, str],
+    configuration: dict[str, Any],
+) -> dict[str, str]:
+    if not credential:
+        raise ValueError("Resolved HTTP credential is empty")
+    if "authorization" in credential:
+        return {"Authorization": credential["authorization"]}
+    token = credential.get("bearer_token") or credential.get("token")
+    if token:
+        mode = str(configuration.get("credential_mode", "bearer"))
+        if mode == "bearer":
+            return {"Authorization": f"Bearer {token}"}
+        if mode == "api_key":
+            header = str(configuration.get("credential_header", "X-API-Key"))
+            if (
+                SAFE_HEADER.fullmatch(header) is None
+                or header.lower() in FORBIDDEN_CREDENTIAL_HEADERS
+            ):
+                raise ValueError("credential_header is not allowed")
+            return {header: token}
+        raise ValueError("credential_mode must be bearer or api_key")
+    username = credential.get("username")
+    password = credential.get("password")
+    if username and password:
+        encoded = base64.b64encode(
+            f"{username}:{password}".encode("utf-8")
+        ).decode("ascii")
+        return {"Authorization": f"Basic {encoded}"}
+    raise ValueError(
+        "HTTP credential requires authorization, token, bearer_token, or "
+        "username/password values"
+    )
+
+
+def collect_http_json(assignment: dict[str, Any]) -> list[dict[str, Any]]:
+    """Collect an allowlisted JSON endpoint into normalized envelopes."""
 
     target = assignment.get("target") or {}
     configuration = {
@@ -104,10 +146,10 @@ def collect_http_json(assignment: dict[str, Any]) -> list[dict[str, Any]]:
         raise ValueError(
             f"HTTP target host {parsed.hostname!r} is not in the worker allowlist"
         )
-    if assignment.get("credential_profile_ref"):
-        raise ValueError(
-            "Credential-backed HTTP collection requires the future credential broker"
-        )
+    credential_ref = assignment.get("credential_profile_ref")
+    runtime_credential = assignment.get("_runtime", {}).get("credential")
+    if credential_ref and not isinstance(runtime_credential, dict):
+        raise ValueError("Credential-backed HTTP collection was not resolved")
 
     timeout_seconds = int(configuration.get("timeout_seconds", 10))
     if timeout_seconds < 1 or timeout_seconds > 120:
@@ -126,9 +168,15 @@ def collect_http_json(assignment: dict[str, Any]) -> list[dict[str, Any]]:
     if max_records < 1 or max_records > 2000:
         raise ValueError("max_records must be between 1 and 2000")
 
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "iCheck-collector/0.3",
+    }
+    if credential_ref:
+        headers.update(_credential_headers(runtime_credential, configuration))
     request = Request(
         url,
-        headers={"Accept": "application/json", "User-Agent": "iCheck-collector/0.2"},
+        headers=headers,
         method="GET",
     )
     opener = build_opener(_NoRedirect())
@@ -137,11 +185,24 @@ def collect_http_json(assignment: dict[str, Any]) -> list[dict[str, Any]]:
     if len(body) > max_bytes:
         raise ValueError("HTTP response exceeded max_response_bytes")
     document = json.loads(body.decode("utf-8"))
+    return document_to_envelopes(assignment, document, configuration)
+
+
+def document_to_envelopes(
+    assignment: dict[str, Any],
+    document: Any,
+    configuration: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Normalize a trusted adapter's bounded JSON result into envelopes."""
+
+    max_records = int(configuration.get("max_records", 2000))
+    if max_records < 1 or max_records > 2000:
+        raise ValueError("max_records must be between 1 and 2000")
     records = _path(document, configuration.get("records_path"))
     if not isinstance(records, list):
         records = [records]
     if len(records) > max_records:
-        raise ValueError("HTTP response exceeded max_records")
+        raise ValueError("JSON document exceeded max_records")
 
     kind = configuration.get("envelope_kind", "observation")
     allowed_kinds = set(assignment.get("output_kinds") or [])
@@ -160,9 +221,11 @@ def collect_http_json(assignment: dict[str, Any]) -> list[dict[str, Any]]:
     envelopes: list[dict[str, Any]] = []
     for record in records:
         payload = record if isinstance(record, dict) else {"value": record}
-        subject = _optional_path(record, subject_field)
-        idempotency_key = _optional_path(record, idempotency_field)
-        observed_at = _optional_path(record, observed_at_field)
+        subject = _optional_path(payload, subject_field)
+        idempotency_key = _optional_path(payload, idempotency_field)
+        observed_at = _path(payload, observed_at_field) if observed_at_field else None
+        if observed_at_field and observed_at is None:
+            raise ValueError("Configured observed_at_field cannot be missing or null")
         envelopes.append(
             {
                 "kind": kind,

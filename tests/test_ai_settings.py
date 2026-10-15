@@ -1,4 +1,7 @@
 import json
+from datetime import UTC, datetime, timedelta
+
+from icheck.credentials import ProviderCredentialLease
 
 
 class FakeModelListResponse:
@@ -37,12 +40,18 @@ class FakeAIProviderOpener:
         return FakeModelListResponse()
 
 
-def create_ai_credential(client, *, name="ai-runtime-token", secret_ref=None):
+def create_ai_credential(
+    client,
+    *,
+    name="ai-runtime-token",
+    secret_ref=None,
+    provider="environment",
+):
     response = client.post(
         "/api/v1/credential-profiles",
         json={
             "name": name,
-            "provider": "environment",
+            "provider": provider,
             "secret_ref": secret_ref or "env://ICHECK_TEST_AI_PROVIDER_TOKEN",
             "allowed_adapters": ["ai_provider"],
             "created_by": "platform.admin",
@@ -195,6 +204,85 @@ def test_ai_provider_health_fails_closed_when_secret_is_missing(client):
     assert health.status_code == 200, health.text
     assert health.json()["status"] == "unhealthy"
     assert health.json()["error"] == "Referenced environment secret is unavailable"
+
+
+def test_ai_provider_health_resolves_unscoped_server_vault_reference(
+    client,
+    monkeypatch,
+):
+    class StaticVaultProvider:
+        def resolve(self, secret_ref):
+            assert secret_ref == "vault-kv2://kv/ai/primary#token"
+            return {"token": "unit-test-provider-token"}
+
+    monkeypatch.setattr(
+        "icheck.credentials.build_server_credential_providers",
+        lambda: {"vault": StaticVaultProvider()},
+    )
+    requests = []
+    monkeypatch.setattr(
+        "icheck.services.ai_settings.build_opener",
+        lambda *handlers: FakeAIProviderOpener(requests),
+    )
+    create_ai_credential(
+        client,
+        name="vault-ai-token",
+        provider="vault",
+        secret_ref="vault-kv2://kv/ai/primary#token",
+    )
+    provider = create_ai_provider(client, credential_ref="vault-ai-token")
+
+    health = client.post(
+        f"/api/v1/ai/providers/{provider['id']}/health",
+        params={"actor": "platform.admin"},
+    )
+
+    assert health.status_code == 200, health.text
+    assert health.json()["status"] == "healthy"
+    assert len(requests) == 1
+
+
+def test_ai_provider_health_revokes_dynamic_server_credential_lease(
+    client,
+    monkeypatch,
+):
+    revoked = []
+
+    class DynamicVaultProvider:
+        def resolve(self, secret_ref):
+            assert secret_ref == "vault-dynamic://ai/creds/runtime"
+            return ProviderCredentialLease(
+                values={"token": "unit-test-provider-token"},
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                revoke_callback=lambda: revoked.append("revoked"),
+            )
+
+    monkeypatch.setattr(
+        "icheck.credentials.build_server_credential_providers",
+        lambda: {"vault_dynamic": DynamicVaultProvider()},
+    )
+    requests = []
+    monkeypatch.setattr(
+        "icheck.services.ai_settings.build_opener",
+        lambda *handlers: FakeAIProviderOpener(requests),
+    )
+    create_ai_credential(
+        client,
+        name="dynamic-ai-token",
+        provider="vault_dynamic",
+        secret_ref="vault-dynamic://ai/creds/runtime",
+    )
+    provider = create_ai_provider(client, credential_ref="dynamic-ai-token")
+
+    health = client.post(
+        f"/api/v1/ai/providers/{provider['id']}/health",
+        params={"actor": "platform.admin"},
+    )
+
+    assert health.status_code == 200, health.text
+    assert health.json()["status"] == "healthy"
+    assert len(requests) == 1
+    assert revoked == ["revoked"]
 
 
 def test_ai_route_rejects_model_without_reasoning_capabilities(client):

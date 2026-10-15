@@ -1,9 +1,86 @@
 import json
+from dataclasses import replace
+
+from sqlalchemy import select, update
+from sqlalchemy.sql.dml import Update
+
+from icheck.database import SessionLocal
+from icheck.device_schemas import DevicePreflightClaim
+from icheck.models import CollectorWorker, Device, DeviceConnection, DeviceConnectionPreflight
+from icheck.services.devices import claim_device_preflights
+from icheck.auth import current_principal
+from icheck.main import app
+from icheck.services.control_plane_auth import development_principal
 
 
 REGISTRATION_HEADERS = {
     "X-iCheck-Registration-Token": "test-registration-token"
 }
+
+
+def test_disable_optional_connection_expires_old_lease_and_retains_history(client):
+    response = client.post("/api/v1/assets/devices", json={"name":"optional-check-fixture","kind":"switch",
+        "management_ip":"198.18.1.10","site":"LAB","created_by":"fixture",
+        "connections":[{"protocol":"snmp"},{"protocol":"icmp"}]})
+    assert response.status_code == 201, response.text
+    device = response.json()
+    snmp = next(row for row in device["connections"] if row["protocol"]=="snmp")
+    ping = next(row for row in device["connections"] if row["protocol"]=="icmp")
+    with SessionLocal() as db:
+        db.get(DeviceConnection,snmp["id"]).verification_status="verified"
+        db.commit()
+    worker, headers = register_worker(client,name="optional-check-worker",site="LAB",capabilities=["icmp"])
+    claim = client.post(f"/api/v1/collector-workers/{worker['id']}/device-preflights/claim",headers=headers,
+        json={"max_assignments":1,"lease_seconds":60}).json()[0]
+    path = f"/api/v1/assets/devices/{device['id']}/connections/{ping['id']}/enabled"
+    result = client.patch(path,json={"expected_revision":device["revision"],"enabled":False,"actor":"fixture",
+        "reason":"Disable the optional unavailable ping check."})
+    assert result.status_code==200, result.text
+    assert result.json()["onboarding_status"]=="verified"
+    disabled = next(row for row in result.json()["connections"] if row["id"]==ping["id"])
+    assert not disabled["enabled"] and disabled["verification_status"]=="disabled"
+    assert len(result.json()["connections"])==2
+    history = client.get(path.removesuffix("/enabled")+"/preflights").json()
+    assert len(history)==1 and history[0]["status"]=="expired"
+    late = client.post(f"/api/v1/collector-workers/{worker['id']}/device-preflights/{claim['preflight_id']}/complete",
+        headers=headers,json={"lease_token":claim["lease_token"],"status":"verified","evidence":{"reachable":True}})
+    assert late.status_code==409
+
+
+def test_connection_reenable_does_not_restore_monitoring_and_requires_current_revision(client):
+    from test_monitoring_enrollments import seeded, approve
+    device, connection, _, monitoring_path = seeded(client)
+    approved = approve(client,monitoring_path)
+    assert approved.status_code==200, approved.text
+    path=monitoring_path.removesuffix("/monitoring")+"/enabled"
+    payload={"expected_revision":device["revision"],"enabled":False,"actor":"fixture","reason":"Disable this fixture monitoring connection."}
+    result=client.patch(path,json=payload)
+    assert result.status_code==200, result.text
+    assert not client.get(monitoring_path).json()["enrollment"]["enabled"]
+    assert client.get("/api/v1/monitoring/targets").json()["targets"]==[]
+    assert client.patch(path,json={**payload,"enabled":True}).status_code==409
+    enabled=client.patch(path,json={**payload,"expected_revision":result.json()["revision"],"enabled":True})
+    assert enabled.status_code==200, enabled.text
+    assert enabled.json()["connections"][0]["verification_status"]=="pending"
+    assert enabled.json()["onboarding_status"]=="pending_verification"
+    assert not client.get(monitoring_path).json()["enrollment"]["enabled"]
+    assert client.get("/api/v1/monitoring/targets").json()["targets"]==[]
+
+
+def test_connection_state_permission_scope_and_strict_boolean(client):
+    device=onboard_device(client)
+    connection=device["connections"][0]
+    path=f"/api/v1/assets/devices/{device['id']}/connections/{connection['id']}/enabled"
+    payload={"expected_revision":device["revision"],"enabled":False,"actor":"fixture","reason":"Disable this optional fixture connection."}
+    assert client.patch(path,json={**payload,"enabled":"false"}).status_code==422
+    try:
+        app.dependency_overrides[current_principal]=lambda:replace(development_principal(),permissions=frozenset({"assets.read"}))
+        assert client.patch(path,json=payload).status_code==403
+        app.dependency_overrides[current_principal]=lambda:replace(development_principal(),authorization_scope={"sites":["OTHER"]})
+        assert client.patch(path,json=payload).status_code in {403,404}
+    finally:
+        app.dependency_overrides.pop(current_principal,None)
+    with SessionLocal() as db: assert db.get(DeviceConnection,connection["id"]).enabled
 
 
 def register_worker(client, *, name, site, capabilities):
@@ -42,6 +119,51 @@ def onboard_device(client, *, protocol="icmp", credential_profile_ref=None):
     )
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def test_claim_releases_connection_when_device_revision_changes_before_assignment(
+    client, monkeypatch,
+):
+    device = onboard_device(client)
+    worker, _ = register_worker(
+        client, name="lab-revision-guard-worker", site="LAB", capabilities=["icmp"]
+    )
+    connection_id = device["connections"][0]["id"]
+    with SessionLocal() as db:
+        registered_worker = db.get(CollectorWorker, worker["id"])
+        original_execute = db.execute
+        injected = False
+
+        def execute_with_revision_change(statement, *args, **kwargs):
+            nonlocal injected
+            result = original_execute(statement, *args, **kwargs)
+            if (
+                not injected
+                and isinstance(statement, Update)
+                and statement.table.name == "device_connections"
+            ):
+                injected = True
+                original_execute(
+                    update(Device)
+                    .execution_options(synchronize_session=False)
+                    .where(Device.id == device["id"])
+                    .values(revision=Device.revision + 1)
+                )
+            return result
+
+        monkeypatch.setattr(db, "execute", execute_with_revision_change)
+        assignments = claim_device_preflights(
+            db, registered_worker, DevicePreflightClaim(max_assignments=1)
+        )
+    assert injected
+    assert assignments == []
+    with SessionLocal() as db:
+        connection = db.get(DeviceConnection, connection_id)
+        assert connection.verification_status == "pending"
+        assert connection.verification_lease_token_hash is None
+        assert db.scalars(select(DeviceConnectionPreflight).where(
+            DeviceConnectionPreflight.connection_id == connection_id
+        )).all() == []
 
 
 def test_worker_claims_scoped_preflight_and_reports_verified_evidence(client):

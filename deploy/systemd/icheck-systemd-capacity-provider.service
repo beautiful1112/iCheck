@@ -1,0 +1,34 @@
+[Unit]
+Description=iCheck allowlisted systemd worker capacity provider
+After=network-online.target postgresql.service dbus.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=icheck-capacity
+Group=icheck-capacity
+WorkingDirectory=/opt/icheck
+EnvironmentFile=/etc/icheck/systemd-capacity-provider.env
+ExecStart=/opt/icheck/.venv/bin/icheck-systemd-capacity-provider
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

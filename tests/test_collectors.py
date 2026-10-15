@@ -3,6 +3,8 @@ import json
 import pytest
 
 from icheck.collectors.http_json import collect_http_json
+from icheck.database import SessionLocal
+from icheck.models import CollectorRun
 
 
 REGISTRATION_HEADERS = {
@@ -17,6 +19,10 @@ def register_collector_worker(client, *, name, site):
             "name": name,
             "site": site,
             "capabilities": ["http_json"],
+            "labels": {
+                "execution_admission_v1": True,
+                "io_supervisor_v1": True,
+            },
         },
         headers=REGISTRATION_HEADERS,
     )
@@ -296,6 +302,91 @@ def test_collector_worker_lease_envelope_and_completion_flow(client):
     } <= event_types
 
 
+def test_legacy_worker_cannot_claim_regular_deployment(client):
+    _, version = publish_collector(client)
+    deployment = client.post("/api/v1/collector-deployments", json={
+        "name": "legacy-gate-internal",
+        "artifact_version_id": version["id"],
+        "target": {"url": "https://inventory.example.test/assets"},
+        "configuration": {},
+        "worker_selector": {"site": "HQ"},
+        "created_by": "platform.operator",
+    })
+    assert deployment.status_code == 201, deployment.text
+    registered = client.post("/api/v1/collector-workers/register", json={
+        "name": "legacy-collector", "site": "HQ",
+        "capabilities": ["http_json"],
+        "labels": {"execution_admission_v1": True},
+    }, headers=REGISTRATION_HEADERS)
+    assert registered.status_code == 200, registered.text
+    worker = registered.json()["worker"]
+    headers = {"Authorization": f"Bearer {registered.json()['access_token']}"}
+    refused = client.post(
+        f"/api/v1/collector-workers/{worker['id']}/leases/claim",
+        json={"max_assignments": 1, "lease_seconds": 60}, headers=headers,
+    )
+    assert refused.status_code == 200, refused.text
+    assert refused.json() == []
+
+
+@pytest.mark.parametrize("adapter", ["icmp", "ssh", "node_exporter", "cadvisor", "vmware_exporter"])
+def test_monitoring_preflight_capability_cannot_claim_regular_deployment(client, adapter):
+    from sqlalchemy import select
+    from icheck.models import CollectorDefinition, CollectorWorker
+    _, version = publish_collector(client)
+    deployment = client.post("/api/v1/collector-deployments", json={
+        "artifact_version_id": version["id"], "name": "preflight-only-fixture",
+        "target": {"url": "https://inventory.example.test/assets"},
+        "schedule_seconds": 60, "created_by": "platform.operator",
+    })
+    assert deployment.status_code == 201, deployment.text
+    worker, headers = register_collector_worker(client, name="monitoring-preflight-worker", site="LAB")
+    # A mistakenly scheduled endpoint must not acquire a routine envelope lease
+    # merely because this worker advertises a metric-test executor. No I/O runs.
+    with SessionLocal() as db:
+        db.scalar(select(CollectorDefinition).where(
+            CollectorDefinition.artifact_version_id == version["id"])).adapter_type = adapter
+        db.get(CollectorWorker, worker["id"]).capabilities = [adapter]
+        db.commit()
+    response = client.post(f"/api/v1/collector-workers/{worker['id']}/leases/claim",
+        json={"max_assignments": 1, "lease_seconds": 60}, headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json() == []
+
+
+def test_lost_supervisor_marker_denies_active_run_mutations(client):
+    _, version = publish_collector(client)
+    deployment = client.post("/api/v1/collector-deployments", json={
+        "name": "supervisor-marker-drift",
+        "artifact_version_id": version["id"],
+        "target": {"url": "https://inventory.example.test/assets"},
+        "configuration": {},
+        "worker_selector": {"site": "HQ"},
+        "created_by": "platform.operator",
+    })
+    assert deployment.status_code == 201, deployment.text
+    worker, headers = register_collector_worker(
+        client, name="supervisor-marker-worker", site="HQ",
+    )
+    claimed = client.post(
+        f"/api/v1/collector-workers/{worker['id']}/leases/claim",
+        json={"max_assignments": 1, "lease_seconds": 60}, headers=headers,
+    )
+    assert claimed.status_code == 200, claimed.text
+    assignment = claimed.json()[0]
+    with SessionLocal() as db:
+        run = db.get(CollectorRun, assignment["run_id"])
+        run.worker.labels = {"execution_admission_v1": True}
+        db.commit()
+    denied = client.post(
+        f"/api/v1/collector-runs/{assignment['run_id']}/lease",
+        json={"lease_token": assignment["lease_token"], "lease_seconds": 60},
+        headers=headers,
+    )
+    assert denied.status_code == 409, denied.text
+    assert "requires supervised adapter I/O" in denied.text
+
+
 def test_worker_registration_authentication_and_token_rotation(client):
     payload = {
         "name": "collector-rotation-01",
@@ -395,6 +486,7 @@ def test_credential_profiles_authorize_adapter_and_worker_scope(client):
         },
     )
     assert profile.status_code == 201, profile.text
+    assert profile.json()["revision"] == 0
     assert "password" not in profile.text.lower()
 
     artifact_payload = collector_artifact_payload("credentialed-api")
@@ -508,3 +600,139 @@ def test_http_json_adapter_fails_closed_for_unapproved_host():
                 },
             }
         )
+
+
+def test_run_scoped_credential_grant_requires_worker_and_active_lease(client):
+    profile = client.post(
+        "/api/v1/credential-profiles",
+        json={
+            "name": "inventory-http-readonly",
+            "provider": "vault",
+            "secret_ref": "vault-kv2://kv/network/inventory#token",
+            "allowed_adapters": ["http_json"],
+            "worker_selector": {"site": "HQ"},
+            "created_by": "security.operator",
+        },
+    )
+    assert profile.status_code == 201, profile.text
+    _, version = publish_collector(client)
+    deployment = client.post(
+        "/api/v1/collector-deployments",
+        json={
+            "name": "credentialed-http-hq",
+            "artifact_version_id": version["id"],
+            "target": {"url": "https://inventory.example.test/assets"},
+            "configuration": {},
+            "worker_selector": {"site": "HQ"},
+            "credential_profile_ref": "inventory-http-readonly",
+            "schedule_seconds": 300,
+            "created_by": "platform.operator",
+        },
+    )
+    assert deployment.status_code == 201, deployment.text
+    worker, worker_headers = register_collector_worker(
+        client, name="credential-worker-hq", site="HQ"
+    )
+    other_worker, other_headers = register_collector_worker(
+        client, name="credential-worker-other", site="HQ"
+    )
+    claim = client.post(
+        f"/api/v1/collector-workers/{worker['id']}/leases/claim",
+        json={"max_assignments": 1, "lease_seconds": 60},
+        headers=worker_headers,
+    )
+    assert claim.status_code == 200, claim.text
+    assignment = claim.json()[0]
+    grant_url = (
+        f"/api/v1/collector-runs/{assignment['run_id']}/credential-grant"
+    )
+
+    wrong_worker = client.post(
+        grant_url,
+        json={"lease_token": assignment["lease_token"]},
+        headers=other_headers,
+    )
+    assert wrong_worker.status_code == 401
+
+    wrong_lease = client.post(
+        grant_url,
+        json={"lease_token": "x" * 32},
+        headers=worker_headers,
+    )
+    assert wrong_lease.status_code == 409
+
+    grant = client.post(
+        grant_url,
+        json={"lease_token": assignment["lease_token"]},
+        headers=worker_headers,
+    )
+    assert grant.status_code == 200, grant.text
+    assert grant.json()["provider"] == "vault"
+    assert grant.json()["profile_revision"] == 0
+    assert grant.json()["adapter_type"] == "http_json"
+    assert grant.json()["deployment_id"] == deployment.json()["id"]
+    assert grant.json()["secret_ref"] == (
+        "vault-kv2://kv/network/inventory#token"
+    )
+
+    rotated = client.post(
+        f"/api/v1/credential-profiles/{profile.json()['id']}/rotate",
+        json={
+            "expected_revision": 0,
+            "secret_ref": "vault-kv2://kv/network/inventory-v2#token",
+            "reason": "Move to the second managed secret path.",
+            "actor": "security.operator",
+        },
+    )
+    assert rotated.status_code == 200, rotated.text
+    assert rotated.json()["revision"] == 1
+    stale = client.post(
+        f"/api/v1/credential-profiles/{profile.json()['id']}/rotate",
+        json={
+            "expected_revision": 0,
+            "secret_ref": "vault-kv2://kv/network/inventory-v3#token",
+            "reason": "Stale concurrent operation.",
+            "actor": "security.operator",
+        },
+    )
+    assert stale.status_code == 409
+    renewed_grant = client.post(
+        grant_url,
+        json={"lease_token": assignment["lease_token"]},
+        headers=worker_headers,
+    )
+    assert renewed_grant.status_code == 200, renewed_grant.text
+    assert renewed_grant.json()["profile_revision"] == 1
+    assert renewed_grant.json()["secret_ref"] == (
+        "vault-kv2://kv/network/inventory-v2#token"
+    )
+
+    events = client.get(
+        "/api/v1/audit-events?event_type=credential.grant.issued"
+    ).json()
+    assert len(events) == 2
+    assert "secret_ref" not in events[0]["details"]
+    assert "network/inventory" not in json.dumps(events[0])
+    rotation_events = client.get(
+        "/api/v1/audit-events?event_type=credential.profile.rotated"
+    ).json()
+    assert len(rotation_events) == 1
+    assert rotation_events[0]["details"]["revision"] == 1
+    assert "inventory-v2" not in json.dumps(rotation_events)
+    assert "Move to the second" not in json.dumps(rotation_events)
+
+    completed = client.post(
+        f"/api/v1/collector-runs/{assignment['run_id']}/complete",
+        json={
+            "lease_token": assignment["lease_token"],
+            "status": "succeeded",
+        },
+        headers=worker_headers,
+    )
+    assert completed.status_code == 200, completed.text
+    expired = client.post(
+        grant_url,
+        json={"lease_token": assignment["lease_token"]},
+        headers=worker_headers,
+    )
+    assert expired.status_code == 409

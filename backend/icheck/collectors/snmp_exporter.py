@@ -15,6 +15,34 @@ from prometheus_client.parser import text_string_to_metric_families
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
+class SNMPExporterFailure(ValueError):
+    """Recognized, bounded diagnostics; never retain the raw exporter body."""
+    def __init__(self, message, diagnostic):
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
+
+def _http_failure(error, modules, auth_module):
+    try:
+        body = error.read(4097).decode("utf-8", "replace").strip()
+    except Exception:
+        body = ""
+    finally:
+        error.close()
+    for kind, allowed in (("module", modules), ("auth", [auth_module])):
+        match = re.fullmatch(r"Unknown " + kind + r" ['\"]([A-Za-z0-9_.-]{1,128})['\"]", body)
+        if error.code == 400 and match and match[1] in allowed:
+            name = match[1]
+            return SNMPExporterFailure(f"SNMP Exporter HTTP 400: Unknown {kind} '{name}'. "
+                "Correct the connection using the installed exporter catalog; this is not a community rejection.",
+                {"code": f"snmp_unknown_{kind}", "http_status": 400, kind: name,
+                 "next_action": "Correct the exporter module/auth configuration and reverify."})
+    return SNMPExporterFailure(f"SNMP Exporter returned HTTP {error.code}. "
+        "No recognized safe diagnostic was returned; this alone does not prove an invalid community.",
+        {"code": "snmp_exporter_http_error", "http_status": error.code,
+         "next_action": "Review exporter configuration, reachability and SNMP access; raw response withheld."})
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise HTTPError(
@@ -135,6 +163,19 @@ def collect_snmp_exporter(
         "modules",
         maximum=8,
     )
+    credential = runtime.get("credential", {})
+    if credential:
+        from ..managed_snmp import exporter, module_document
+        from ..snmp_modules import IDENTITY_MODULE, validate_modules
+        validate_modules(modules, available=module_document()["modules"])
+        identity_only = bool(runtime.get("snmp_identity_preflight"))
+        with exporter(credential, timeout_seconds=int(configuration.get("timeout_seconds", 15)),
+            identity_only=identity_only, requested_modules=modules) as local_url:
+            isolated = {**assignment, "target": {**target, "exporter_url": local_url},
+                "configuration": {**configuration, "auth_module": "managed",
+                    "modules": [IDENTITY_MODULE] if identity_only else modules},
+                "_runtime": {**runtime, "credential": {}, "exporter_allowed_hosts": ["127.0.0.1"]}}
+            return collect_snmp_exporter(isolated)
     auth_module = configuration.get("auth_module", "public_v2")
     if not isinstance(auth_module, str) or not NAME_PATTERN.fullmatch(auth_module):
         raise ValueError("auth_module contains an invalid name")
@@ -150,8 +191,15 @@ def collect_snmp_exporter(
     if max_bytes < 1 or max_bytes > 50_000_000:
         raise ValueError("max_response_bytes must be between 1 and 50000000")
     max_metrics = int(configuration.get("max_metrics", 2000))
-    if max_metrics < 1 or max_metrics > 2000:
-        raise ValueError("max_metrics must be between 1 and 2000")
+    inventory_mode = configuration.get("inventory_tables") is True
+    if "inventory_tables" in configuration and type(configuration["inventory_tables"]) is not bool:
+        raise ValueError("inventory_tables must be a boolean")
+    if inventory_mode and configuration.get("inventory_vlan_context") is not None:
+        if runtime.get("snmp_inventory_context_vlan") != configuration["inventory_vlan_context"]:
+            raise ValueError("Inventory VLAN labeling requires a runtime-verified SNMP context")
+    metric_limit = 20000 if runtime.get("snmp_requested_metric_test") or inventory_mode else 2000
+    if max_metrics < 1 or max_metrics > metric_limit:
+        raise ValueError(f"max_metrics must be between 1 and {metric_limit}")
     include_prefixes = configuration.get("include_metric_prefixes", [])
     if not isinstance(include_prefixes, list) or any(
         not isinstance(item, str) for item in include_prefixes
@@ -172,11 +220,11 @@ def collect_snmp_exporter(
         },
         method="GET",
     )
-    with build_opener(_NoRedirect()).open(
-        request,
-        timeout=timeout_seconds,
-    ) as response:
-        body = response.read(max_bytes + 1)
+    try:
+        with build_opener(_NoRedirect()).open(request, timeout=timeout_seconds) as response:
+            body = response.read(max_bytes + 1)
+    except HTTPError as exc:
+        raise _http_failure(exc, modules, auth_module) from None
     if len(body) > max_bytes:
         raise ValueError("SNMP exporter response exceeded max_response_bytes")
     try:
@@ -228,6 +276,11 @@ def collect_snmp_exporter(
                     "idempotency_key": None,
                 }
             )
-    if not envelopes:
+    if not envelopes and not runtime.get("allow_empty_snmp_metrics", False):
         raise ValueError("SNMP exporter response contained no selected metrics")
+    if inventory_mode:
+        from .snmp_inventory import normalize_tables
+        return normalize_tables(envelopes, target=snmp_target, source=str(source),
+            context_vlan=configuration.get("inventory_vlan_context"),
+            max_endpoints=configuration.get("max_inventory_endpoints", 2000))
     return envelopes

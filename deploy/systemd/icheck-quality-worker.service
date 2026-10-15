@@ -1,0 +1,31 @@
+[Unit]
+Description=iCheck regional capability execution-quality controller
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=icheck-quality
+Group=icheck-quality
+UMask=0077
+WorkingDirectory=/opt/icheck
+EnvironmentFile=/etc/icheck/quality-worker.env
+ExecStart=/opt/icheck/.venv/bin/icheck-quality-worker
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StateDirectory=icheck-quality
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/icheck-quality
+
+[Install]
+WantedBy=multi-user.target

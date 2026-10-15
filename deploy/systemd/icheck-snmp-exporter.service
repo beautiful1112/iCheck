@@ -5,14 +5,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=icheck
-Group=icheck
+User=icheck-snmp-exporter
+Group=icheck-snmp-exporter
 EnvironmentFile=-/etc/icheck/secrets/snmp-exporter.env
-ExecStart=/opt/icheck/bin/snmp_exporter --config.file=/etc/icheck/snmp/snmp.yml --config.expand-environment-variables --web.listen-address=127.0.0.1:9116
+ExecStart=/opt/icheck/bin/snmp_exporter --config.file=/etc/icheck-workers/snmp-exporter/snmp.yml --config.expand-environment-variables --web.listen-address=127.0.0.1:9116
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
-UMask=0027
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

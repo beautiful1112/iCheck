@@ -1,0 +1,22 @@
+# Add this job to the operator-owned scrape_configs once the gateway is accepted.
+# Do not simultaneously scrape the same devices through manual legacy target files.
+scrape_configs:
+  - job_name: icheck_continuous
+    honor_labels: false
+    scrape_protocols: [PrometheusText0.0.4]
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    body_size_limit: 10MB
+    sample_limit: 20000
+    label_limit: 64
+    label_name_length_limit: 128
+    label_value_length_limit: 2048
+    authorization:
+      credentials_file: /etc/icheck-workers/prometheus/gateway-token
+    http_sd_configs:
+      - url: http://127.0.0.1:9120/discovery
+        refresh_interval: 15s
+        authorization:
+          credentials_file: /etc/icheck-workers/prometheus/gateway-token
+# The gateway copy and Prometheus copy of this private token must match.
+# Exporter secrets and the API read token are separate, gateway-only custody.

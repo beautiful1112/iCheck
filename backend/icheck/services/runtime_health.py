@@ -161,14 +161,14 @@ def refresh_device_runtime_status(db: Session, device_id: str) -> Device:
     device = db.get(Device, device_id)
     if device is None:
         raise LookupError("Device not found")
+    verification_status = _verification_status(db, device)
     rows = db.execute(
         select(
-            DeviceConnection.verification_status,
-            DeviceConnectionActivation.status,
             DeviceConnectionActivation.runtime_status,
             CollectorDeployment.execution_mode,
         )
-        .outerjoin(
+        .select_from(DeviceConnection)
+        .join(
             DeviceConnectionActivation,
             DeviceConnectionActivation.connection_id == DeviceConnection.id,
         )
@@ -179,26 +179,27 @@ def refresh_device_runtime_status(db: Session, device_id: str) -> Device:
         .where(
             DeviceConnection.device_id == device_id,
             DeviceConnection.enabled.is_(True),
+            DeviceConnectionActivation.status == "active",
         )
     ).all()
     old_status = device.onboarding_status
-    all_configured = bool(rows) and all(
-        verification_status == "verified" and activation_status == "active"
-        for verification_status, activation_status, _, _ in rows
-    )
-    if not all_configured:
-        new_status = _verification_status(db, device)
+    if verification_status != "verified":
+        new_status = verification_status
+    elif not rows:
+        new_status = "verified"
     else:
         scheduled = [
             runtime_status
-            for _, _, runtime_status, mode in rows
+            for runtime_status, mode in rows
             if mode == CollectorDeploymentMode.SCHEDULED
         ]
         any_drift = any(
             runtime_status == "drifted"
-            for _, _, runtime_status, _ in rows
+            for runtime_status, _ in rows
         )
-        if any_drift or any(item in {"degraded", "stale"} for item in scheduled):
+        if any_drift or any(
+            item in {"degraded", "stale"} for item in scheduled
+        ):
             new_status = "degraded"
         elif scheduled and all(item == "healthy" for item in scheduled):
             new_status = "active"

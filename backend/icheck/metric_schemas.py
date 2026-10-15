@@ -3,12 +3,13 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from .schemas import APIModel
 
 
 MetricProvider = Literal["prometheus", "victoriametrics", "mimir", "thanos"]
+MetricBackendAuthType = Literal["none", "bearer", "basic", "header"]
 
 
 class MetricBackendCreate(APIModel):
@@ -16,10 +17,58 @@ class MetricBackendCreate(APIModel):
     provider: MetricProvider
     query_base_url: str = Field(min_length=1, max_length=2048)
     remote_write_url: str | None = Field(default=None, max_length=2048)
+    auth_type: MetricBackendAuthType = "none"
+    auth_header_name: str | None = Field(default=None, max_length=128)
     credential_profile_ref: str | None = Field(default=None, max_length=255)
     external_labels: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
     created_by: str = Field(min_length=1, max_length=255)
+
+    @field_validator("auth_header_name", "credential_profile_ref")
+    @classmethod
+    def strip_optional_auth_value(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_auth_contract(self) -> "MetricBackendCreate":
+        from .services.observability_auth import validate_backend_auth_contract
+
+        validate_backend_auth_contract(
+            auth_type=self.auth_type,
+            auth_header_name=self.auth_header_name,
+            credential_profile_ref=self.credential_profile_ref,
+        )
+        return self
+
+
+class MetricBackendUpdate(APIModel):
+    expected_revision: int = Field(ge=0)
+    name: str = Field(min_length=1, max_length=255)
+    provider: MetricProvider
+    query_base_url: str = Field(min_length=1, max_length=2048)
+    remote_write_url: str | None = Field(default=None, max_length=2048)
+    auth_type: MetricBackendAuthType = "none"
+    auth_header_name: str | None = Field(default=None, max_length=128)
+    credential_profile_ref: str | None = Field(default=None, max_length=255)
+    external_labels: dict[str, str] = Field(default_factory=dict)
+    enabled: bool = True
+    actor: str = Field(min_length=1, max_length=255)
+
+    @field_validator("auth_header_name", "credential_profile_ref")
+    @classmethod
+    def strip_optional_auth_value(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_auth_contract(self) -> "MetricBackendUpdate":
+        from .services.observability_auth import validate_backend_auth_contract
+
+        validate_backend_auth_contract(
+            auth_type=self.auth_type,
+            auth_header_name=self.auth_header_name,
+            credential_profile_ref=self.credential_profile_ref,
+        )
+        return self
 
 
 class MetricBackendRead(APIModel):
@@ -28,9 +77,12 @@ class MetricBackendRead(APIModel):
     provider: str
     query_base_url: str
     remote_write_url: str | None
+    auth_type: MetricBackendAuthType
+    auth_header_name: str | None
     credential_profile_ref: str | None
     external_labels: dict[str, str]
     enabled: bool
+    revision: int
     created_by: str
     last_checked_at: datetime | None
     last_health_status: str | None

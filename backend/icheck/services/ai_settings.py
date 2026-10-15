@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from collections.abc import Iterator
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -18,7 +20,7 @@ from ..ai_schemas import (
     AIProviderUpdate,
 )
 from ..config import get_settings
-from ..credentials import CredentialUnavailable, resolve_server_secret
+from ..credentials import CredentialUnavailable, resolved_server_secret
 from ..models import (
     AIModelConfig,
     AIModelRoute,
@@ -94,6 +96,7 @@ def _validate_credential(
     db: Session,
     auth_type: str,
     credential_profile_ref: str | None,
+    *, owner_provider_id: str | None = None,
 ) -> None:
     if auth_type == "none":
         return
@@ -117,6 +120,18 @@ def _validate_credential(
         raise ValueError(
             "AI provider credentials must not be scoped to collector workers"
         )
+    if profile.provider == "managed_ai":
+        from .openrouter_setup import connection_for
+        connection = connection_for(db, owner_provider_id) if owner_provider_id else None
+        if connection is None or connection.credential_profile_id != profile.id:
+            raise ValueError("Managed AI keys can only be used by their owning provider")
+
+
+def validated_provider_url(db: Session, provider: AIProviderConfig) -> str:
+    """Database approvals stay provider-bound; never widen the environment allowlist."""
+    from .openrouter_setup import validate_managed_url
+    managed = validate_managed_url(db, provider)
+    return managed if managed is not None else _validate_base_url(provider.base_url, get_settings().ai_allowed_host_list)
 
 
 def create_ai_provider(
@@ -125,6 +140,8 @@ def create_ai_provider(
     *,
     allowed_hosts: list[str],
 ) -> AIProviderConfig:
+    from .ai_catalog_mutex import catalog_lock
+    catalog_lock(db)
     base_url = _validate_base_url(payload.base_url, allowed_hosts)
     _validate_credential(
         db,
@@ -150,6 +167,8 @@ def create_ai_provider(
                 "base_host": urlsplit(base_url).hostname,
                 "auth_type": provider.auth_type,
                 "credential_configured": provider.credential_profile_ref is not None,
+                "privacy_tier": provider.privacy_tier,
+                "data_residency": provider.data_residency,
             },
         )
         db.commit()
@@ -167,6 +186,45 @@ def get_ai_provider(db: Session, provider_id: str) -> AIProviderConfig:
     return provider
 
 
+class AIProviderRuntimeConflict(ValueError):
+    pass
+
+
+def update_ai_provider_runtime_settings(db: Session, provider_id: str, payload, *, actor: str):
+    """Timeout-only change: no key/endpoint/route edits or provider inference."""
+    from .ai_catalog_mutex import catalog_lock
+    from .openrouter_setup import connection_for
+    catalog_lock(db)
+    provider = db.scalar(select(AIProviderConfig).where(AIProviderConfig.id == provider_id)
+        .with_for_update().execution_options(populate_existing=True))
+    if provider is None:
+        raise LookupError("AI provider not found")
+    if not provider.enabled:
+        raise AIProviderRuntimeConflict("Provider is retired; restore it before changing runtime settings")
+    connection = connection_for(db, provider_id, lock=True)
+    if provider.request_timeout_seconds != payload.expected_request_timeout_seconds or (
+        connection is not None and connection.revision != payload.expected_connection_revision
+    ):
+        raise AIProviderRuntimeConflict("Provider runtime settings changed; refresh before saving")
+    if connection is None and payload.expected_connection_revision is not None:
+        raise AIProviderRuntimeConflict("Provider connection changed; refresh before saving")
+    old_timeout = provider.request_timeout_seconds
+    if old_timeout == payload.request_timeout_seconds:
+        return provider
+    provider.request_timeout_seconds = payload.request_timeout_seconds
+    provider.updated_at = utcnow()
+    if connection is not None:
+        connection.revision += 1
+        connection.updated_by, connection.updated_at = actor, utcnow()
+    record_audit_event(db, event_type="ai.provider.runtime_settings_updated", actor_type="user", actor_id=actor,
+        entity_type="ai_provider", entity_id=provider_id, details={
+            "previous_request_timeout_seconds": old_timeout, "request_timeout_seconds": provider.request_timeout_seconds,
+            "connection_revision": connection.revision if connection else None,
+            "key_rotated": False, "outbound_approval_changed": False, "inference_performed": False})
+    db.commit()
+    return provider
+
+
 def update_ai_provider(
     db: Session,
     provider: AIProviderConfig,
@@ -174,11 +232,27 @@ def update_ai_provider(
     *,
     allowed_hosts: list[str],
 ) -> AIProviderConfig:
-    base_url = _validate_base_url(payload.base_url, allowed_hosts)
+    from .ai_catalog_mutex import catalog_lock
+    catalog_lock(db)
+    from .openrouter_setup import connection_for
+    from ..ai_provider_presets import PRESETS
+    managed = connection_for(db, provider.id)
+    if managed is not None:
+        preset = PRESETS[managed.preset]
+        if (payload.base_url != preset.base_url or payload.auth_type != preset.auth_type
+                or payload.provider_type != preset.provider_type or payload.privacy_tier != "external"):
+            raise ValueError("Managed AI providers require their approved HTTPS endpoint, protocol, authentication and external privacy tier")
+        profile = db.get(CredentialProfile, managed.credential_profile_id)
+        if profile is None or payload.credential_profile_ref not in {profile.id, profile.name}:
+            raise ValueError("Managed AI providers must retain their bound credential profile")
+        base_url = preset.base_url
+    else:
+        base_url = _validate_base_url(payload.base_url, allowed_hosts)
     _validate_credential(
         db,
         payload.auth_type,
         payload.credential_profile_ref,
+        owner_provider_id=provider.id,
     )
     values = payload.model_dump(exclude={"actor", "base_url"})
     for field, value in values.items():
@@ -200,6 +274,8 @@ def update_ai_provider(
             "base_host": urlsplit(base_url).hostname,
             "auth_type": provider.auth_type,
             "credential_configured": provider.credential_profile_ref is not None,
+            "privacy_tier": provider.privacy_tier,
+            "data_residency": provider.data_residency,
         },
     )
     try:
@@ -212,8 +288,16 @@ def update_ai_provider(
 
 
 def create_ai_model(db: Session, payload: AIModelCreate) -> AIModelConfig:
-    if db.get(AIProviderConfig, payload.provider_id) is None:
+    from .ai_catalog_mutex import catalog_lock
+    from ..ai_failure_diagnostics import batch_model
+    catalog_lock(db)
+    parent = db.get(AIProviderConfig, payload.provider_id)
+    if parent is None:
         raise ValueError("AI provider does not exist")
+    if payload.enabled and not parent.enabled:
+        raise ValueError("Enable the provider before adding an active model")
+    if parent.base_url.rstrip("/") == "https://openrouter.ai/api/v1" and batch_model(payload.model_name):
+        raise ValueError("Batch-only models cannot run interactive Agents or Studio; choose a synchronous model")
     assert_no_inline_secrets(payload.default_parameters, "default_parameters")
     model = AIModelConfig(**payload.model_dump())
     db.add(model)
@@ -230,6 +314,7 @@ def create_ai_model(db: Session, payload: AIModelCreate) -> AIModelConfig:
                 "provider_id": model.provider_id,
                 "model_name": model.model_name,
                 "capabilities": model.capabilities,
+                "cost_class": model.cost_class,
             },
         )
         db.commit()
@@ -251,6 +336,9 @@ def create_ai_model_route(
     db: Session,
     payload: AIModelRouteCreate,
 ) -> AIModelRoute:
+    from .ai_catalog_mutex import catalog_lock
+    from ..ai_failure_diagnostics import batch_model
+    catalog_lock(db)
     models = [
         _model(db, model_id)
         for model_id in [payload.primary_model_id, *payload.fallback_model_ids]
@@ -263,6 +351,8 @@ def create_ai_model_route(
             raise ValueError(
                 f"AI model {model.id!r} does not have an enabled provider"
             )
+        if provider.base_url.rstrip("/") == "https://openrouter.ai/api/v1" and batch_model(model.model_name):
+            raise ValueError("Batch-only OpenRouter models cannot be used by interactive routes")
         if not {"chat", "json_schema"} <= set(model.capabilities):
             raise ValueError(
                 f"AI model {model.id!r} requires chat and json_schema capabilities"
@@ -296,61 +386,82 @@ def create_ai_model_route(
     return route
 
 
+@contextmanager
 def _models_request_headers(
     db: Session,
     provider: AIProviderConfig,
-) -> dict[str, str]:
+) -> Iterator[dict[str, str]]:
     headers = {
         "Accept": "application/json",
         "User-Agent": "iCheck-ai-provider-check/0.1",
     }
+    if provider.provider_type == "anthropic":
+        headers["anthropic-version"] = "2023-06-01"
     if provider.auth_type == "none":
-        return headers
+        yield headers
+        return
     if not provider.credential_profile_ref:
         raise AIProviderUnavailable("AI provider has no credential profile")
     profile = _credential_profile(db, provider.credential_profile_ref)
     if profile is None:
         raise AIProviderUnavailable("AI provider credential profile is missing")
+    if profile.provider == "managed_ai":
+        from .openrouter_setup import ManagedAIUnavailable, resolved_managed_key
+        try:
+            with resolved_managed_key(db, provider, profile) as secret:
+                yield {**headers, **({"X-API-Key": secret} if provider.auth_type == "api_key"
+                                     else {"Authorization": "Bearer " + secret})}
+        except ManagedAIUnavailable as exc:
+            raise AIProviderUnavailable(str(exc)) from exc
+        return
     try:
-        secret = resolve_server_secret(profile, adapter_type="ai_provider")
+        with resolved_server_secret(
+            profile,
+            adapter_type="ai_provider",
+        ) as secret:
+            if provider.auth_type == "bearer":
+                headers["Authorization"] = f"Bearer {secret}"
+            elif provider.auth_type == "api_key":
+                headers["X-API-Key"] = secret
+            else:
+                raise AIProviderUnavailable("AI provider auth type is unsupported")
+            yield headers
     except CredentialUnavailable as exc:
         raise AIProviderUnavailable(str(exc)) from exc
-    if provider.auth_type == "bearer":
-        headers["Authorization"] = f"Bearer {secret}"
-    elif provider.auth_type == "api_key":
-        headers["X-API-Key"] = secret
-    else:
-        raise AIProviderUnavailable("AI provider auth type is unsupported")
-    return headers
 
 
 def _request_models(db: Session, provider: AIProviderConfig) -> int:
     if not provider.enabled:
         raise AIProviderUnavailable("AI provider is disabled")
+    from .openrouter_setup import connection_for, fetch_catalog, ManagedAIUnavailable
+    if connection_for(db, provider.id) is not None:
+        try:
+            count, _ = fetch_catalog(db, provider)
+            return count
+        except ManagedAIUnavailable as exc:
+            raise AIProviderUnavailable(str(exc)) from exc
     try:
-        base_url = _validate_base_url(
-            provider.base_url,
-            get_settings().ai_allowed_host_list,
-        )
+        base_url = validated_provider_url(db, provider)
     except ValueError as exc:
         raise AIProviderUnavailable(str(exc)) from exc
-    request = Request(
-        f"{base_url}/models",
-        headers=_models_request_headers(db, provider),
-        method="GET",
-    )
-    try:
-        with build_opener(_NoRedirect()).open(
-            request,
-            timeout=provider.request_timeout_seconds,
-        ) as response:
-            body = response.read(MAX_MODEL_LIST_BYTES + 1)
-    except HTTPError as exc:
-        raise AIProviderUnavailable(
-            f"AI provider returned HTTP {exc.code}"
-        ) from exc
-    except (OSError, URLError) as exc:
-        raise AIProviderUnavailable("AI provider request failed") from exc
+    with _models_request_headers(db, provider) as headers:
+        request = Request(
+            f"{base_url}/models",
+            headers=headers,
+            method="GET",
+        )
+        try:
+            with build_opener(_NoRedirect()).open(
+                request,
+                timeout=provider.request_timeout_seconds,
+            ) as response:
+                body = response.read(MAX_MODEL_LIST_BYTES + 1)
+        except HTTPError as exc:
+            raise AIProviderUnavailable(
+                f"AI provider returned HTTP {exc.code}"
+            ) from exc
+        except (OSError, URLError) as exc:
+            raise AIProviderUnavailable("AI provider request failed") from exc
     if len(body) > MAX_MODEL_LIST_BYTES:
         raise AIProviderUnavailable(
             "AI provider response exceeded the 1000000 byte limit"

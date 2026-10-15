@@ -1,13 +1,20 @@
 from urllib.parse import parse_qs, urlsplit
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
+from icheck.builtin_agent_tools import ensure_builtin_agent_tools
 from icheck.builtin_artifacts import (
     psrp_cim_artifact_payload,
     windows_exporter_artifact_payload,
 )
 from icheck.collectors.psrp_cim import CIM_OPERATIONS, collect_psrp_cim
 from icheck.collectors.windows_exporter import collect_windows_exporter
+from icheck.database import SessionLocal
+from icheck.models import AgentToolRegistration, CollectorDeployment, CollectorRun, Device
+from icheck.schema_validation import validate_instance
+from icheck.services.agent_tools import execute_internal_tool
 
 
 REGISTRATION_HEADERS = {
@@ -78,6 +85,10 @@ def psrp_assignment(executor=None, operations=None):
             "windows_allowed_targets": ["*.example.test"],
             "lease_seconds": 60,
             "psrp_cim_executor": executor,
+            "credential": {
+                "username": "monitoring-readonly",
+                "password": "test-only-password",
+            },
         },
     }
 
@@ -143,7 +154,12 @@ def test_psrp_cim_uses_only_published_read_only_template():
     assert envelopes[0]["payload"]["data"]["BuildNumber"] == "26100"
     assert calls[0]["script"] == CIM_OPERATIONS["operating_system"]
     assert calls[0]["credential_profile_ref"] == "windows-readonly"
+    assert calls[0]["credential"] == {
+        "username": "monitoring-readonly",
+        "password": "test-only-password",
+    }
     assert calls[0]["use_ssl"] is True
+    assert calls[0]["max_response_bytes"] == 100_000
 
     with pytest.raises(ValueError, match="Unsupported read-only CIM operation"):
         collect_psrp_cim(psrp_assignment(executor, ["invoke_expression"]))
@@ -154,7 +170,39 @@ def test_psrp_cim_fails_closed_without_credential_executor():
         collect_psrp_cim(psrp_assignment())
 
 
-def test_windows_artifacts_and_on_demand_diagnostic_lifecycle(client):
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_cim_evidence_projection_rejects_nonfinite_fields(value):
+    from icheck.services.agent_tools import _windows_diagnostic_value
+    with pytest.raises(ValueError, match="finite"):
+        _windows_diagnostic_value(value)
+
+
+@pytest.mark.parametrize("cursor", ["synthetic-private-cursor", "2026-10-12T12:00:00", "2099-01-01T00:00:00Z"])
+def test_cim_request_cursor_requires_aware_timestamp_without_echo(client, cursor):
+    device = client.post("/api/v1/devices", json={"name": "cursor-host", "kind": "windows_server", "management_ip": "198.18.1.10"}).json()
+    with SessionLocal() as db:
+        ensure_builtin_agent_tools(db)
+        tool = db.scalar(select(AgentToolRegistration).where(AgentToolRegistration.name == "windows.get_latest_diagnostics"))
+        with pytest.raises(ValueError) as error:
+            execute_internal_tool(db, tool, {"device_id": device["id"], "not_before": cursor})
+        assert cursor not in str(error.value)
+
+
+@pytest.mark.parametrize("fault", [None, "stale_observation", "future_observation", "target_changed", "assignment_changed",
+    "requested_after", "wrong_deployment", "missing_operation", "disabled_deployment", "wrong_subject",
+    "changed_during_read", "disabled_during_read", "truncated_operations", "unconfigured_operation"])
+def test_windows_artifacts_and_on_demand_diagnostic_lifecycle(client, fault, monkeypatch):
+    device = client.post(
+        "/api/v1/devices",
+        json={
+            "name": "win-app-01",
+            "kind": "windows_server",
+            "management_ip": "10.20.7.42",
+            "site": "HQ",
+        },
+    )
+    assert device.status_code == 201, device.text
+    device_id = device.json()["id"]
     windows_version_id = publish_artifact(
         client,
         windows_exporter_artifact_payload(),
@@ -167,6 +215,9 @@ def test_windows_artifacts_and_on_demand_diagnostic_lifecycle(client):
             "target": {"url": "http://10.20.7.42:9182/metrics"},
             "configuration": {"collectors": ["cpu", "os"]},
             "worker_selector": {"site": "HQ"},
+            "scope_device_id": device_id,
+            "scope_device_identity_revision": device.json()["identity_revision"],
+            "scope_site": "HQ",
             "created_by": "windows.operator",
         },
     )
@@ -217,16 +268,20 @@ def test_windows_artifacts_and_on_demand_diagnostic_lifecycle(client):
     assert missing_credential.status_code == 422
     assert "credential_profile_ref" in missing_credential.text
 
+    operations = ["operating_system", "computer_system"] if fault == "truncated_operations" else ["operating_system"]
     deployment = client.post(
         "/api/v1/collector-deployments",
         json={
             "name": "windows-diagnostics",
             "artifact_version_id": psrp_version_id,
             "target": {"host": "win-app-01.example.test", "use_ssl": True},
-            "configuration": {"operations": ["operating_system"]},
+            "configuration": {"operations": operations},
             "worker_selector": {"site": "HQ"},
             "credential_profile_ref": "windows-readonly",
             "execution_mode": "on_demand",
+            "scope_device_id": device_id,
+            "scope_device_identity_revision": device.json()["identity_revision"],
+            "scope_site": "HQ",
             "created_by": "windows.operator",
         },
     )
@@ -241,6 +296,7 @@ def test_windows_artifacts_and_on_demand_diagnostic_lifecycle(client):
             "name": "windows-diagnostics-hq-01",
             "site": "HQ",
             "capabilities": ["psrp_cim"],
+            "labels": {"io_supervisor_v1": True},
         },
         headers=REGISTRATION_HEADERS,
     )
@@ -258,15 +314,41 @@ def test_windows_artifacts_and_on_demand_diagnostic_lifecycle(client):
     assert no_work.status_code == 200
     assert no_work.json() == []
 
-    triggered = client.post(
-        f"/api/v1/collector-deployments/{deployment_id}/trigger",
-        json={
-            "actor": "windows.operator",
+    with SessionLocal() as db:
+        ensure_builtin_agent_tools(db)
+        request_tool = db.scalar(
+            select(AgentToolRegistration).where(
+                AgentToolRegistration.name == "windows.request_diagnostics"
+            )
+        )
+        assert request_tool is not None
+        assert request_tool.read_only is False
+        request_arguments = {
+            "device_id": device_id,
+            "operations": operations,
             "reason": "Investigate application latency",
-        },
-    )
-    assert triggered.status_code == 200, triggered.text
-    assert triggered.json()["next_run_at"] is not None
+        }
+        requested, request_evidence = execute_internal_tool(
+            db,
+            request_tool,
+            request_arguments,
+        )
+        validate_instance(
+            requested,
+            request_tool.output_schema,
+            "Windows diagnostic request result",
+        )
+        replayed, replay_evidence = execute_internal_tool(
+            db,
+            request_tool,
+            request_arguments,
+        )
+    assert requested["device_id"] == device_id
+    assert requested["deployment_id"] == deployment_id
+    assert requested["queue_status"] == "queued"
+    assert replayed["queue_status"] == "already_queued"
+    assert request_evidence[0].evidence_type == "windows_diagnostic_request"
+    assert replay_evidence[0].evidence_id == request_evidence[0].evidence_id
 
     claimed = client.post(
         f"/api/v1/collector-workers/{worker_id}/leases/claim",
@@ -277,6 +359,61 @@ def test_windows_artifacts_and_on_demand_diagnostic_lifecycle(client):
     assignment = claimed.json()[0]
     assert assignment["adapter_type"] == "psrp_cim"
     assert assignment["credential_profile_ref"] == "windows-readonly"
+    admitted = client.post(
+        f"/api/v1/collector-runs/{assignment['run_id']}/admit",
+        json={
+            "lease_token": assignment["lease_token"],
+            "assignment_sha256": assignment["assignment_sha256"],
+        },
+        headers=worker_headers,
+    )
+    assert admitted.status_code == 200, admitted.text
+
+    ingested = client.post(
+        f"/api/v1/collector-runs/{assignment['run_id']}/envelopes",
+        json={
+            "lease_token": assignment["lease_token"],
+            "envelopes": [
+                {
+                    "kind": "observation",
+                    "type": "windows.cim.operating_system",
+                    "source": "psrp_cim:builtin-psrp-cim-diagnostics",
+                    "subject": "other-host.example.test" if fault == "wrong_subject" else "win-app-01.example.test",
+                    "observed_at": (datetime.now(UTC) + timedelta(hours=-2 if fault == "stale_observation" else 2 if fault == "future_observation" else 0)).isoformat(),
+                    "payload": {
+                        "operation": "operating_system",
+                        "target": "win-app-01.example.test",
+                        "data": {
+                            "Caption": "Windows Server 2025",
+                            "Version": "10.0.26100",
+                            "BuildNumber": "26100",
+                            "LastBootUpTime": "2026-09-28T09:00:00Z",
+                            "TotalVisibleMemorySize": 16777216,
+                            "FreePhysicalMemory": 8388608,
+                            "InternalOwner": "must-not-enter-agent-evidence",
+                        },
+                    },
+                }
+            ],
+        },
+        headers=worker_headers,
+    )
+    assert ingested.status_code == 200, ingested.text
+    assert ingested.json()["accepted"] == 1
+    received = 1
+    if fault in {"truncated_operations", "unconfigured_operation"}:
+        def frame(operation, data):
+            return {"kind": "observation", "type": "windows.cim." + operation,
+                "source": "psrp_cim:builtin-psrp-cim-diagnostics", "subject": "win-app-01.example.test",
+                "observed_at": datetime.now(UTC).isoformat(),
+                "payload": {"operation": operation, "target": "win-app-01.example.test", "data": data}}
+        extra = [frame("computer_system", {"Name": "win-app-01", "NumberOfLogicalProcessors": 4})]
+        if fault == "truncated_operations": extra += [frame("operating_system", {"Caption": "Windows Server 2025"}) for _ in range(4)]
+        added = client.post(f"/api/v1/collector-runs/{assignment['run_id']}/envelopes", headers=worker_headers,
+            json={"lease_token": assignment["lease_token"], "envelopes": extra})
+        assert added.status_code == 200, added.text
+        assert added.json()["accepted"] == len(extra)
+        received += len(extra)
 
     completed = client.post(
         f"/api/v1/collector-runs/{assignment['run_id']}/complete",
@@ -294,10 +431,80 @@ def test_windows_artifacts_and_on_demand_diagnostic_lifecycle(client):
     }[deployment_id]
     assert stored["next_run_at"] is None
 
+    with SessionLocal() as db:
+        ensure_builtin_agent_tools(db)
+        tool = db.scalar(
+            select(AgentToolRegistration).where(
+                AgentToolRegistration.name
+                == "windows.get_latest_diagnostics"
+            )
+        )
+        assert tool is not None
+        arguments = {"device_id": device_id, "operations": ["operating_system"], "max_age_minutes": 60, "limit": 10,
+            "deployment_id": deployment_id, "not_before": requested["requested_at"]}
+        if fault == "target_changed":
+            db.get(Device, device_id).identity_revision += 1; db.commit()
+        if fault == "assignment_changed":
+            db.get(CollectorDeployment, deployment_id).configuration = {"operations": ["computer_system"]}; db.commit()
+        if fault == "disabled_deployment":
+            db.get(CollectorDeployment, deployment_id).enabled = False; db.commit()
+        if fault == "requested_after": arguments["not_before"] = (datetime.now(UTC) + timedelta(seconds=1)).isoformat()
+        if fault == "wrong_deployment": arguments["deployment_id"] = "not-the-selected-deployment"
+        if fault == "missing_operation": arguments["operations"] = ["operating_system", "computer_system"]
+        if fault == "unconfigured_operation": arguments["operations"] = ["operating_system", "computer_system"]
+        if fault == "truncated_operations":
+            arguments.update(operations=operations, limit=2)
+            result, evidence = execute_internal_tool(db, tool, arguments)
+            validate_instance(result, tool.output_schema, "Truncated Windows diagnostic result")
+            assert result["truncated"] and len(result["records"]) == 2
+            assert {record["operation"] for record in result["records"]} == set(operations)
+            return
+        if fault in {"changed_during_read", "disabled_during_read"}:
+            from icheck.services import agent_tools
+            original = agent_tools._windows_diagnostic_value
+            mutated = False
+            def during_read(value):
+                nonlocal mutated
+                if not mutated:
+                    if fault == "changed_during_read": db.get(Device, device_id).identity_revision += 1
+                    else: db.get(CollectorDeployment, deployment_id).enabled = False
+                    db.commit(); mutated = True
+                return original(value)
+            monkeypatch.setattr(agent_tools, "_windows_diagnostic_value", during_read)
+        if fault:
+            with pytest.raises(LookupError, match="fresh|changed"):
+                execute_internal_tool(db, tool, arguments)
+            # Rejecting current evidence must not delete historical observations.
+            assert db.get(CollectorRun, assignment["run_id"]).status.value == "succeeded"
+            assert len(db.get(CollectorRun, assignment["run_id"]).envelopes) == received
+            return
+        result, evidence = execute_internal_tool(
+            db,
+            tool,
+            arguments,
+        )
+        validate_instance(
+            result,
+            tool.output_schema,
+            "Windows diagnostic result",
+        )
+    assert result["run_id"] == assignment["run_id"]
+    assert result["device_id"] == device_id
+    assert result["records"][0]["fields"]["Caption"] == (
+        "Windows Server 2025"
+    )
+    assert "InternalOwner" not in result["records"][0]["fields"]
+    assert "target" not in result["records"][0]
+    assert evidence[0].evidence_type == "windows_diagnostic_run"
+    assert evidence[0].evidence_id == assignment["run_id"]
+    assert evidence[0].observed_at.isoformat() == result["records"][0]["observed_at"]
+
     triggered_events = client.get(
         "/api/v1/audit-events?event_type=collector.deployment.triggered"
     ).json()
     assert len(triggered_events) == 1
+    assert triggered_events[0]["actor_type"] == "agent"
+    assert triggered_events[0]["actor_id"] == "agent.runtime"
     assert triggered_events[0]["details"] == {
         "reason": "Investigate application latency"
     }

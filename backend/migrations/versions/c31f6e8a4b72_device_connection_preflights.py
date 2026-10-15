@@ -91,7 +91,7 @@ def upgrade() -> None:
     op.execute(
         "UPDATE device_connections "
         "SET next_verification_at = CURRENT_TIMESTAMP "
-        "WHERE enabled = 1 AND verification_status = 'pending'"
+        "WHERE enabled = TRUE AND verification_status = 'pending'"
     )
 
     op.create_table(

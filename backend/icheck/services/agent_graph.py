@@ -66,10 +66,22 @@ class DatabaseCheckpointHook:
             ],
             evidence_ids=state["evidence_ids"],
             tool_call_ids=state["tool_call_ids"],
+            workflow_tool_outcomes=(
+                [
+                    {"call_id": item["call_id"], "status": item["status"]}
+                    for item in state["tool_results"]
+                ]
+                if node == "tools" and self.investigation.workflow_snapshot
+                and state["status"] == "running"
+                else []
+            ),
             confidence=state["confidence"],
             conclusion=state["conclusion"],
             uncertainty=state["uncertainty"],
             escalation_reason=state["escalation_reason"],
+            # Checkpoints written before Skill runtime existed do not carry this
+            # key. Keep resumability fail-safe across the additive migration.
+            structured_output=state.get("structured_output"),
         )
         append_investigation_checkpoint(
             self.db,
@@ -94,6 +106,7 @@ def run_database_investigation(
     actor: str = "agent.langgraph",
     interrupt_after: list[str] | None = None,
     checkpoint_hook: CheckpointHook | None = None,
+    mcp_runtime: Any | None = None,
 ) -> dict[str, Any]:
     """Run a newly started investigation through the bounded graph kernel.
 
@@ -121,7 +134,11 @@ def run_database_investigation(
 
     graph = build_investigation_graph(
         reasoner=reasoner,
-        tool_executor=DatabaseToolExecutor(db, investigation),
+        tool_executor=DatabaseToolExecutor(
+            db,
+            investigation,
+            mcp_runtime=mcp_runtime,
+        ),
         checkpointer=checkpointer,
         checkpoint_hook=(
             checkpoint_hook
@@ -155,6 +172,7 @@ def resume_database_investigation(
     checkpointer: BaseCheckpointSaver,
     actor: str = "agent.langgraph",
     checkpoint_hook: CheckpointHook | None = None,
+    mcp_runtime: Any | None = None,
 ) -> dict[str, Any]:
     """Continue a leased investigation from its LangGraph thread checkpoint."""
 
@@ -163,7 +181,11 @@ def resume_database_investigation(
         raise ValueError("Only running investigations can resume")
     graph = build_investigation_graph(
         reasoner=reasoner,
-        tool_executor=DatabaseToolExecutor(db, investigation),
+        tool_executor=DatabaseToolExecutor(
+            db,
+            investigation,
+            mcp_runtime=mcp_runtime,
+        ),
         checkpointer=checkpointer,
         checkpoint_hook=(
             checkpoint_hook

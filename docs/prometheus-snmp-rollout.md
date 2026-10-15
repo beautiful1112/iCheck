@@ -1,5 +1,21 @@
 # Prometheus and SNMP Exporter live rollout
 
+## Next integration as of 12 October 2026
+
+The next native service is Grafana, connected to the existing private Prometheus
+endpoint without replacing its TSDB or scrape jobs. The
+[integration design](grafana-monitoring-design.md) defines deployment and AI
+management; [P1 in the development plan](development-plan.md#p1-grafana-with-existing-live-metrics)
+is next. Prometheus and SNMP Exporter were active during the read-only
+inspection; no Grafana systemd unit was present.
+
+The r16 SNMP deployment (private development evidence; not distributed)
+records successful collection from the existing switch, and the
+r17 Assets deployment (private development evidence; not distributed)
+records its current-status UI. Older empty-target and installed-r30 statements
+below are historical. Neither record qualifies fleet scale, new lab targets or
+the still-missing full conversational SNMP template lifecycle.
+
 ## Deployment status
 
 The host-local, non-container installation was completed on 2026-09-18 on the
@@ -8,12 +24,32 @@ Exporter are installed as independent systemd services. This completes the
 service installation portion of M1; real-device, remote-write, and scale
 acceptance remain open before the deployment can be called production-ready.
 
-Installed baseline:
+Current custody was migrated and accepted at native r29 on 9 October 2026:
+Prometheus runs as `icheck-prometheus` and SNMP Exporter as
+`icheck-snmp-exporter`, separately from the API account. Configuration is under
+`/etc/icheck-workers/prometheus` and `/etc/icheck-workers/snmp-exporter`; the
+private retained TSDB is `/var/lib/icheck-prometheus`. The root-owned parent is
+0711, component directories are root:component 0750, config files 0640, and
+TSDB state 0700. PID 1 reads the optional private exporter environment at
+`/etc/icheck/secrets/snmp-exporter.env`. No monitoring identity joins the API
+group. Both services are still active/enabled; existing data/targets remain
+retained. See the r29 record (private development evidence; not distributed).
+
+Unbundled source now implements explicit GUI continuous monitoring approval,
+renewal and withdrawal through an independent authenticated scrape gateway.
+Its unit and Prometheus HTTP SD job remain uninstalled; current native backend
+is still r30. No retained monitoring configuration or production migration
+was changed for this source feature. See the
+[continuous monitoring contract](continuous-monitoring.md) for custody,
+cached-discovery revocation, coordinated deployment and remaining live/load/
+metric-series authorization gates. This is not an integrated demo.
+
+Historical 18 September baseline (account/config/state custody superseded above):
 
 - Prometheus `3.13.3` LTS, SHA-256
-  `b349c732d8a853e657d0e7ae1bbad4d11b586615fb65fdc59d896b9f869c001e`.
+  `EXAMPLE_SHA256`.
 - SNMP Exporter `0.30.1`, SHA-256
-  `026aac4e23447ed593a783eccab9089cd41d77d17c9d2a0ab84398e45a0bb93e`.
+  `EXAMPLE_SHA256`.
 - Dedicated non-login service account: `icheck`.
 - Binaries: `/opt/icheck/bin`.
 - Prometheus configuration: `/etc/icheck/prometheus`.
@@ -43,10 +79,10 @@ repository or an AI conversation.
 2. Download pinned release artifacts from the official projects and verify
    checksums before placing binaries under `/opt/icheck/bin`.
 3. Install generated SNMP modules and protected auth configuration under
-   `/etc/icheck/snmp`; secrets use a root-readable external environment or
+   `/etc/icheck-workers/snmp-exporter`; secrets use a root-readable external environment or
    secret-provider file.
 4. Install Prometheus configuration and file-discovery targets under
-   `/etc/icheck/prometheus` and create `/var/lib/icheck/prometheus`.
+   `/etc/icheck-workers/prometheus` and private `/var/lib/icheck-prometheus`.
 5. Validate configuration, install the supplied systemd units, daemon-reload,
    enable, and start both services.
 6. Register the Prometheus query endpoint in iCheck and run its health check.

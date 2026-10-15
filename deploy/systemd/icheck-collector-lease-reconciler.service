@@ -1,0 +1,32 @@
+[Unit]
+Description=iCheck Collector lease reconciler
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=icheck-lease-reconciler
+Group=icheck-lease-reconciler
+UMask=0077
+WorkingDirectory=/opt/icheck
+EnvironmentFile=/etc/icheck/collector-lease-reconciler.env
+ExecStart=/opt/icheck/.venv/bin/icheck-collector-lease-reconciler
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StateDirectory=icheck-lease-reconciler
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/icheck-lease-reconciler
+
+[Install]
+WantedBy=multi-user.target

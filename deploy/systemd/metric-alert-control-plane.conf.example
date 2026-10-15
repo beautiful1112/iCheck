@@ -1,0 +1,4 @@
+# Optional /etc/systemd/system/icheck-control-plane.service.d/metric-alerts.conf
+# Provision the API-owned, Prometheus-readable managed directory before enabling.
+[Service]
+ReadWritePaths=/var/lib/icheck-metric-rules
