@@ -27,7 +27,7 @@ import subprocess
 import sys
 import tarfile
 import time
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, HTTPRedirectHandler, HTTPSHandler, ProxyHandler, build_opener
 
 VERSION = '0.1.0-preview.r19.27'
@@ -378,7 +378,7 @@ def database_setup(backend):
     return urls
 
 
-def request(base, path, *, token=None, body=None, method='GET', ca=None, basic=None):
+def request(base, path, *, token=None, body=None, method='GET', ca=None, basic=None, timeout=120):
     headers = {'Content-Type': 'application/json', 'X-Icheck-Tenant-ID': TENANT, 'X-Icheck-Region-ID': REGION}
     if token:
         headers['Authorization'] = 'Bearer ' + token
@@ -389,11 +389,33 @@ def request(base, path, *, token=None, body=None, method='GET', ca=None, basic=N
         handlers.append(HTTPSHandler(context=ssl.create_default_context(cafile=str(ca))))
     req = Request(base + path, headers=headers, method=method,
                   data=json.dumps(body).encode() if body is not None else None)
-    with build_opener(*handlers).open(req, timeout=120) as response:
+    with build_opener(*handlers).open(req, timeout=timeout) as response:
         raw = response.read(4_000_001)
         if len(raw) > 4_000_000:
             raise InstallError('Unexpected oversized local API response')
         return json.loads(raw) if raw else None
+
+
+def startup_read(operation, *, deadline):
+    """Retry transient reads only, within one shared worker-startup deadline.
+
+    No resource creation, credentials, or other writes use this helper. Invalid
+    authentication, TLS identities and non-transient HTTP errors fail immediately.
+    """
+    while time.monotonic() < deadline:
+        try:
+            return operation(min(120, max(0.1, deadline - time.monotonic())))
+        except HTTPError as error:
+            error.close()
+            if error.code not in (502, 503, 504):
+                raise
+        except URLError as error:
+            if not isinstance(error.reason, (TimeoutError, ConnectionError)):
+                raise
+        except (TimeoutError, ConnectionError):
+            pass
+        time.sleep(min(2, max(0, deadline - time.monotonic())))
+    raise InstallError('Authenticated startup reads did not become ready before the deadline')
 
 
 def wait_ready(url, *, timeout=300):
@@ -512,8 +534,8 @@ def finish(payload, config):
     wait_ready('http://127.0.0.1:8000/api/v1/health')
     token = Path('/var/lib/icheck-preview-access/admin-access-token').read_text().strip()
     ca = Path('/etc/icheck-preview-ingress/preview-ca.pem')
-    def api(path, body=None, method='GET'):
-        return request('https://127.0.0.1:8443/api/v1', path, token=token, body=body, method=method, ca=ca)
+    def api(path, body=None, method='GET', *, timeout=120):
+        return request('https://127.0.0.1:8443/api/v1', path, token=token, body=body, method=method, ca=ca, timeout=timeout)
     identity = api('/auth/me')
     password = config.pop('password')
     api('/auth/principals/' + identity['principal_id'] + '/password',
@@ -651,34 +673,40 @@ def verify_installation(api):
     for service in SERVICES:
         if run(['systemctl', 'is-active', service], 'Check ' + service) != 'active':
             raise InstallError('Service is not active: ' + service)
-    if api('/auth/me').get('subject') != 'admin':
+    # Parallel worker initialization can temporarily delay even an authenticated
+    # GET on a small host. Share a bounded deadline across all readiness reads;
+    # never retry the earlier provisioning mutations or ignore authority errors.
+    deadline = time.monotonic() + 600
+    def read_api(path):
+        return startup_read(lambda timeout: api(path, timeout=timeout), deadline=deadline)
+    if read_api('/auth/me').get('subject') != 'admin':
         raise InstallError('Administrator identity check failed')
-    if not api('/grafana/setup')['storage_ready'] or not api('/metric-alerts/setup')['runtime_provisioned']:
+    if not read_api('/grafana/setup')['storage_ready'] or not read_api('/metric-alerts/setup')['runtime_provisioned']:
         raise InstallError('Local integration is not ready')
     try:
-        request('http://127.0.0.1:8000/api/v1', '/assets/devices?limit=1')
+        startup_read(lambda timeout: request('http://127.0.0.1:8000/api/v1',
+                     '/assets/devices?limit=1', timeout=timeout), deadline=deadline)
     except HTTPError as error:
         if error.code != 401:
             raise InstallError('Anonymous inventory check failed') from None
     else:
         raise InstallError('Anonymous inventory access must be rejected')
-    if api('/assets/devices?limit=1') or api('/ai/providers?limit=1'):
+    if read_api('/assets/devices?limit=1') or read_api('/ai/providers?limit=1'):
         raise InstallError('Fresh installation unexpectedly contains devices or AI providers')
     # Several isolated Python services start together, including on small VMs.
-    deadline = time.monotonic() + 600
     while time.monotonic() < deadline:
-        collectors = api('/collectors/health')
-        agents = api('/agent/workers?limit=100')
+        collectors = read_api('/collectors/health')
+        agents = read_api('/agent/workers?limit=100')
         if collectors.get('workers_online', 0) >= 1 and any(
                 {'openai_compatible', 'anthropic', 'mcp'} <= set(worker.get('capabilities', [])) for worker in agents) and internal_workers_ready():
             break
         time.sleep(2)
     else:
         raise InstallError('Required local worker registration or heartbeat did not become ready')
-    connections = api('/grafana/connections')
+    connections = read_api('/grafana/connections')
     if len(connections) != 1:
         raise InstallError('Expected one native Grafana connection')
-    api('/grafana/connections/' + connections[0]['id'] + '/health')
+    read_api('/grafana/connections/' + connections[0]['id'] + '/health')
 
 
 def main():

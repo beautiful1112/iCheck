@@ -265,6 +265,81 @@ def test_authenticated_requests_never_follow_redirects():
     assert installer.NoRedirect().redirect_request(None, None, 302, None, None, 'https://example.test/') is None
 
 
+@pytest.mark.parametrize('error', [TimeoutError(), ConnectionResetError(),
+    installer.URLError(TimeoutError()), installer.HTTPError('https://localhost', 503, 'starting', {}, None)])
+def test_startup_reads_retry_only_transient_failures(error):
+    from unittest.mock import Mock
+    operation = Mock(side_effect=[error, {'ready': True}])
+    with patch.object(installer.time, 'monotonic', return_value=10), patch.object(installer.time, 'sleep') as sleep:
+        assert installer.startup_read(operation, deadline=70) == {'ready': True}
+    assert operation.call_args_list[0].args == (60,)
+    assert operation.call_count == 2
+    sleep.assert_called_once_with(2)
+
+
+@pytest.mark.parametrize('error', [installer.HTTPError('https://localhost', 401, 'unauthorized', {}, None),
+    installer.HTTPError('https://localhost', 403, 'forbidden', {}, None),
+    installer.HTTPError('https://localhost', 500, 'invalid setup', {}, None),
+    installer.URLError(installer.ssl.SSLCertVerificationError('invalid identity')),
+    ValueError('invalid response')])
+def test_startup_reads_do_not_retry_authentication_tls_or_validation_failures(error):
+    from unittest.mock import Mock
+    operation = Mock(side_effect=error)
+    with patch.object(installer.time, 'monotonic', return_value=10), patch.object(installer.time, 'sleep') as sleep:
+        with pytest.raises(type(error)):
+            installer.startup_read(operation, deadline=70)
+    operation.assert_called_once_with(60)
+    sleep.assert_not_called()
+
+
+def test_startup_read_deadline_is_not_reset_after_a_timeout():
+    from unittest.mock import Mock
+    now = [10]
+    def attempt(timeout):
+        assert timeout == 60
+        now[0] = 71
+        raise TimeoutError()
+    operation = Mock(side_effect=attempt)
+    with patch.object(installer.time, 'monotonic', side_effect=lambda: now[0]), patch.object(installer.time, 'sleep'):
+        with pytest.raises(installer.InstallError, match='deadline'):
+            installer.startup_read(operation, deadline=70)
+    assert operation.call_count == 1
+
+
+def test_startup_reads_do_not_call_after_expired_deadline():
+    from unittest.mock import Mock
+    operation = Mock()
+    with patch.object(installer.time, 'monotonic', return_value=71):
+        with pytest.raises(installer.InstallError, match='deadline'):
+            installer.startup_read(operation, deadline=70)
+    operation.assert_not_called()
+
+
+def test_final_verification_retries_reads_without_repeating_provisioning():
+    from unittest.mock import Mock
+    paths = []
+    replies = {'/auth/me': {'subject': 'admin'}, '/grafana/setup': {'storage_ready': True},
+        '/metric-alerts/setup': {'runtime_provisioned': True}, '/assets/devices?limit=1': [],
+        '/ai/providers?limit=1': [], '/collectors/health': {'workers_online': 1},
+        '/agent/workers?limit=100': [{'capabilities': ['anthropic', 'openai_compatible', 'mcp']}],
+        '/grafana/connections': [{'id': 'fixture'}], '/grafana/connections/fixture/health': {}}
+    def api(path, *, timeout):
+        paths.append(path)
+        assert timeout == 120
+        if len(paths) == 1:
+            raise TimeoutError()
+        return replies[path]
+    anonymous = Mock(side_effect=[TimeoutError(), installer.HTTPError('http://localhost', 401, 'unauthorized', {}, None)])
+    with patch.object(installer, 'wait_ready'), patch.object(installer, 'run', return_value='active'), \
+         patch.object(installer, 'request', anonymous), patch.object(installer, 'internal_workers_ready', return_value=True), \
+         patch.object(installer.time, 'monotonic', return_value=10), patch.object(installer.time, 'sleep'):
+        installer.verify_installation(api)
+    assert paths[:2] == ['/auth/me', '/auth/me']
+    assert len(paths) == len(replies) + 1
+    assert anonymous.call_count == 2
+    assert all(call.kwargs == {'timeout': 120} for call in anonymous.call_args_list)
+
+
 @pytest.mark.parametrize('existing', ['/opt/icheck', '/etc/icheck', '/var/lib/icheck-installer', '/var/lib/icheck-grafana'])
 def test_preflight_refuses_existing_state(existing):
     original_read = Path.read_text
