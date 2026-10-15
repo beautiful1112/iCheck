@@ -3,10 +3,15 @@
 This release is an engineering preview, not a claim of production readiness,
 fleet scalability, universal device support or unattended remediation.
 
-- Native Linux x86_64 packaging is tied to the recorded Python/runtime versions.
-  A fresh installation needs explicit infrastructure provisioning and acceptance.
-- No devices, credentials, provider keys, dashboards, notification destinations
-  or lab network permissions are included. Examples do not authorize access.
+- The one-command installer supports fresh Ubuntu 24.04 x86_64 hosts only.
+  Other Linux distributions, ARM, offline installation and automatic upgrades
+  are not qualified by this installer.
+- No devices, existing credentials, provider keys, private dashboards or lab
+  permissions are shipped. Setup creates fresh custody, two reusable Grafana
+  dashboards and a local Alertmanager receiver; monitoring networks must be
+  chosen explicitly. Examples do not authorize access.
+- Evaluation server/worker certificates expire after 90 days; integration tokens
+  expire after 30 days. Automatic renewal is not implemented in this prerelease.
 - Synthetic tests do not replace device interoperability, load, backup/restore
   or end-to-end notification tests on the installation owner's environment.
 - Model catalogs and successful probes do not guarantee reasoning quality,

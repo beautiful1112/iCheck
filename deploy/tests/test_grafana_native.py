@@ -78,7 +78,7 @@ def test_existing_data_is_not_adopted_by_first_install(tmp_path, monkeypatch):
         monkeypatch.setattr(native, name, tmp_path / name.lower())
     native.DATA.mkdir()
     with pytest.raises(ValueError, match="Existing Grafana"):
-        native.install(tmp_path / "never-opened.tar.gz", "https://icheck.test/grafana/")
+        native.install(tmp_path / "never-opened.tar.gz", "https://icheck.test/grafana/", "operator")
 
 
 def test_verifier_keeps_credentials_private_and_rejects_symlinks(tmp_path):

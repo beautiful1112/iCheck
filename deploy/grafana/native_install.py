@@ -35,7 +35,7 @@ INGRESS = Path("/etc/icheck-preview-ingress/nginx.conf")
 BACKUP = Path("/var/backups/icheck/grafana-first-install")
 USER = "icheck-grafana"
 UNIT = Path("/etc/systemd/system/grafana-server.service")
-USERNAME = "zhao@icheck.preview"
+USERNAME = "admin"
 
 
 def trusted(path):
@@ -173,7 +173,7 @@ def api_call(route, *, password, method="GET", data=None):
         raise RuntimeError("Grafana API returned HTTP " + str(status)) from None
 
 
-def install(artifact, public_url):
+def install(artifact, public_url, operator_user):
     trusted(Path(__file__).resolve())
     sys.path.insert(0, str(Path(__file__).parent))
     from dashboards import baseline_dashboards
@@ -237,7 +237,7 @@ def install(artifact, public_url):
     write_new(CONFIG / "provisioning/datasources/prometheus.yaml", json.dumps(datasource, indent=2), gid=account.pw_gid)
     os.symlink("grafana-releases/" + VERSION, ACTIVE)
     write_new(UNIT, (Path(__file__).parent / "grafana-server.service").read_bytes(), mode=0o644)
-    owner = pwd.getpwnam("zhao")
+    owner = pwd.getpwnam(operator_user)
     private = Path(owner.pw_dir) / ".icheck"
     info = private.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != owner.pw_uid or stat.S_IMODE(info.st_mode) != 0o700:
@@ -291,12 +291,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact", type=Path, required=True)
     parser.add_argument("--public-url", required=True)
+    parser.add_argument("--operator-user", required=True, help="Existing local operator owning protected .icheck custody")
     parser.add_argument("--acknowledge-native-install", action="store_true")
     args = parser.parse_args()
     if os.geteuid() != 0 or not args.acknowledge_native_install:
         parser.error("Require root deployment access and explicit native-install acknowledgement")
     try:
-        install(args.artifact, args.public_url)
+        install(args.artifact, args.public_url, args.operator_user)
     except Exception as error:
         print("Grafana installation stopped (" + type(error).__name__ + "). "
               "Inspect existing paths, service and retained backup before retrying; secret details withheld.", file=sys.stderr)

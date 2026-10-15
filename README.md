@@ -3,7 +3,7 @@
 An AI-native IT operations platform built around an operator agent, extensible
 capabilities and evidence-based monitoring.
 
-## Engineering Preview 0.1.0 · r19.26
+## Engineering Preview 0.1.0 · r19.27
 
 This is a **single-node engineering preview**, not a production-readiness or
 large-fleet scalability claim. No operator database, accounts, provider tokens,
@@ -23,21 +23,30 @@ calls may incur charges. Infrastructure changes remain separately governed.
 
 ## Download and deploy
 
-Download the native Linux x86_64 archive and `SHA256SUMS` from
-[Releases](https://github.com/beautiful1112/iCheck/releases).
-It includes the application wheel, locked dependency wheels, standalone GUI and
-operator tools. The source archive contains reusable source and synthetic tests.
+Download the `.run` installer and `SHA256SUMS` from
+[Releases](https://github.com/beautiful1112/iCheck/releases). Verify the checksum,
+then run this command on a dedicated fresh Ubuntu 24.04 x86_64 server:
 
-Read the [installation manual](docs/engineering-preview-installation.md).
-Native deployment uses systemd, without Docker. PostgreSQL, Node.js, Prometheus,
-SNMP Exporter, Grafana and Alertmanager are separate prerequisites. This is not
-a one-command clean-host appliance installer.
+```bash
+sudo bash icheck-0.1.0-preview.r19.27-ubuntu24.04-amd64.run
+```
+
+The [one-command installation guide](docs/native-one-command-installer.md)
+explains prerequisites, prompts, HTTPS, credentials and recovery. The installer
+automatically provisions native systemd services without Docker. Its prebuilt
+application is embedded; OS and monitoring prerequisites require network access.
+It refuses existing installations and is not an unattended upgrade tool.
+
+The earlier r19.26 native archive remains available for administrators following
+the [manual installation/upgrade procedure](docs/engineering-preview-installation.md).
+Source archives contain reusable code, English documentation and synthetic tests;
+GitHub's automatically generated source downloads are not installation packages.
 
 ### First login
 
 | Setting | Value |
 | --- | --- |
-| Web username | `admin` using the documented bootstrap helper |
+| Web username | `admin`, created by the native installer |
 | Web password | The unique 15–256-character passphrase entered during setup |
 | Default/shared password | **None** |
 | Login page | `https://YOUR_SERVER:8443/login`, or your configured HTTPS origin |

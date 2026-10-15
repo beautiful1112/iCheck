@@ -1,5 +1,11 @@
 # Native installation and upgrade
 
+For a new dedicated Ubuntu 24.04 x86_64 server, use the
+[r19.27 one-command installer](native-one-command-installer.md). It automates
+prerequisite installation and the first-install steps below. This manual remains
+the administrator reference for the r19.26 application payload and guarded
+upgrades; the new installer does not overwrite an existing installation.
+
 ## Scope and prerequisites
 
 Engineering Preview 0.1.0-preview.r19.26 is a native single-node evaluation
