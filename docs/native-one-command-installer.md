@@ -1,7 +1,7 @@
 # Native one-command installer
 
-The r19.27 installer packages the verified r19.26 application with a new automated
-fresh-host setup. It runs native Linux processes managed by systemd. Docker is
+The r19.28 installer packages the N1–N3 application with automated fresh-host
+setup. It runs native Linux processes managed by systemd. Docker is
 neither installed nor required. This is a single-node engineering prerelease,
 not a production-readiness or thousand-device capacity claim.
 
@@ -22,7 +22,7 @@ an **online installer**, not a completely offline appliance image.
 
 ## Download, verify, install
 
-Download `icheck-0.1.0-preview.r19.27-ubuntu24.04-amd64.run` and `SHA256SUMS`
+Download `icheck-0.1.0-preview.r19.28-ubuntu24.04-amd64.run` and `SHA256SUMS`
 from the GitHub prerelease Assets section. The automatically generated source
 archives are not installers. If the repository is private, first authenticate
 to GitHub to download its assets; no GitHub token is needed on the target host.
@@ -31,13 +31,13 @@ Verify the downloaded file:
 
 ```bash
 sha256sum --check --ignore-missing SHA256SUMS
-bash icheck-0.1.0-preview.r19.27-ubuntu24.04-amd64.run --check
+bash icheck-0.1.0-preview.r19.28-ubuntu24.04-amd64.run --check
 ```
 
 Then start the single installation command:
 
 ```bash
-sudo bash icheck-0.1.0-preview.r19.27-ubuntu24.04-amd64.run
+sudo bash icheck-0.1.0-preview.r19.28-ubuntu24.04-amd64.run
 ```
 
 Answer the prompts for the server address, approved monitoring network(s), and
@@ -149,13 +149,13 @@ Do not interpret an empty-inventory check as appropriate after adding real devic
 ## Rebuilding the installer
 
 Maintainers build from the checked-in source and the hash-pinned, published
-r19.26 Linux amd64 application archive:
+r19.28 Linux amd64 application archive:
 
 ```bash
 python3 deploy/build_native_installer.py \
-  --application /absolute/path/icheck-engineering-preview-0-1-0-r19-26-public-linux-amd64.tar.gz \
+  --application /absolute/path/icheck-engineering-preview-0-1-0-r19-28-public-linux-amd64.tar.gz \
   --source "$PWD" \
-  --out /absolute/new/path/icheck-0.1.0-preview.r19.27-ubuntu24.04-amd64.run
+  --out /absolute/new/path/icheck-0.1.0-preview.r19.28-ubuntu24.04-amd64.run
 ```
 
 The builder refuses an unqualified application archive, linked or unexpected

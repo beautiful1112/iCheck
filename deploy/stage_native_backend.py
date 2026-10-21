@@ -44,6 +44,8 @@ SERVICE_ACCOUNTS = {
     "icheck-projection": (),
     "icheck-indicator": (),
     "icheck-workflow-dispatch": (),
+    "icheck-integration-sync": (),
+    "icheck-integration-alert": (),
     "icheck-rollout": (),
     "icheck-scaling": (),
     "icheck-quality": (),

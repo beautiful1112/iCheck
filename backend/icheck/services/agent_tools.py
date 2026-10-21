@@ -2226,6 +2226,13 @@ for _grafana_tool in GRAFANA_TOOLS:
     SCOPED_INTERNAL_HANDLERS.add(_name)
 
 from ..metric_alert_tools import METRIC_ALERT_TOOLS
+from ..integration_tools import INTEGRATION_TOOLS
+from .integration_alerts import tools_for_ai as integration_tools_for_ai
+for _integration_tool in INTEGRATION_TOOLS:
+    _name = _integration_tool["name"]
+    INTERNAL_HANDLERS[_name] = lambda db, arguments, principal, name=_name: integration_tools_for_ai(name, db, arguments, principal)
+    SCOPED_INTERNAL_HANDLERS.add(_name)
+
 from ..research_tools import RESEARCH_TOOLS
 from .research import tools_for_ai as research_tools_for_ai
 for _research_tool in RESEARCH_TOOLS:

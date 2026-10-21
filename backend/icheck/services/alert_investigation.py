@@ -136,7 +136,14 @@ def dispatch_alert_investigations(db, *, limit=20):
         situation = db.scalar(select(Situation).join(SituationAlert, SituationAlert.situation_id == Situation.id).where(
             SituationAlert.alert_id == alert.id, situation_scope_clause(principal)).order_by(Situation.created_at.desc()).limit(1))
         group = f"situation:{situation.id}" if situation else f"{alert.entity_type}:{alert.entity_id}"
+        if alert.event_type in {"external.zabbix", "external.solarwinds_orion", "external.rest_webhook"}:
+            # Keep each source episode's stop boundary independent. Grouping it
+            # under another triggering alert would bypass its own source silence.
+            group = f"external:{alert.id}"
         reason = None
+        if alert.event_type in {"external.zabbix", "external.solarwinds_orion", "external.rest_webhook"}:
+            from .integration_alerts import stop_reason as external_stop_reason
+            reason = external_stop_reason(db, alert)
         if alert.status == AlertStatus.RESOLVED:
             reason = "Alert already resolved; no investigation started"
         elif alert.severity.value not in policy.severities:
@@ -181,6 +188,15 @@ def dispatch_alert_investigations(db, *, limit=20):
                     start_investigation(db, investigation, actor="system.alert-investigation", commit=False)
                     event.investigation_id = investigation.id
                     event.status, event.reason = "dispatched", "Read-only investigation queued"
+                    if alert.event_type in {"external.zabbix", "external.solarwinds_orion", "external.rest_webhook"}:
+                        from ..models import InvestigationEvidence
+                        db.add(InvestigationEvidence(investigation_id=investigation.id,
+                            tenant_id=alert.tenant_id, region_id=alert.region_id,
+                            evidence_type="external_monitoring_alert", evidence_id=alert.id,
+                            summary=f"Zabbix source event {alert.details.get('source_event_id')}; "
+                                    f"source trigger {alert.details.get('source_trigger_id')}. "
+                                    "Use integrations.alerts.read for current source-attributed evidence.",
+                            observed_at=alert.last_seen))
                     db.add(event)
                     db.flush()
                 active += 1

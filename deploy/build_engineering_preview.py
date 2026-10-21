@@ -43,6 +43,8 @@ PREVIEW_FILES = {
         "http-monitoring", "system-exporter-monitoring", "container-monitoring",
         "vmware-monitoring", "metric-alerts", "tool-skill-designer",
         "snmp-exporter-attestation",
+        "integrations-and-operation-packages", "monitoring-bridge-contract",
+        "external-alert-investigation", "native-one-command-installer",
     )},
     **{f"config/alertmanager/{name}":f"deploy/alertmanager/{name}" for name in (
         "alertmanager.yml.example","prometheus-alerting.yml.example","rules.yml.example","control-plane.env.example")},

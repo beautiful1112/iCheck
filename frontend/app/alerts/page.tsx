@@ -49,9 +49,11 @@ export default function AlertsPage() {
       const identity = await apiFetch<Principal>("/auth/me");
       if (!permits(identity, "alerts.read")) throw new Error("Your identity needs alerts.read to inspect alert evidence.");
       const requestedDevice = new URLSearchParams(window.location.search).get("device_id");
+      const requestedAlert = new URLSearchParams(window.location.search).get("alert");
+      const episode = requestedAlert && /^[0-9a-f-]{36}$/i.test(requestedAlert) ? requestedAlert : null;
       const device = requestedDevice && /^[0-9a-f-]{36}$/i.test(requestedDevice) ? requestedDevice : null;
       const [nextAlerts, nextRules] = await Promise.all([
-        apiFetch<Alert[]>(`/alerts?limit=1000${filter ? `&status=${filter}` : ""}${device ? `&device_id=${encodeURIComponent(device)}` : ""}`),
+        apiFetch<Alert[]>(`/alerts?limit=1000${episode ? `&alert_id=${encodeURIComponent(episode)}` : filter ? `&status=${filter}` : ""}${device ? `&device_id=${encodeURIComponent(device)}` : ""}`),
         apiFetch<Rule[]>("/alert-rules"),
       ]);
       if (loadVersion.current !== version) return;
@@ -95,6 +97,18 @@ export default function AlertsPage() {
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Acknowledgement failed"); }
     finally { setBusy(null); }
   }
+  async function closeExternal(alert: Alert) {
+    if (!canAcknowledge || busy || loading || !principal || alert.status === "resolved" || !["external.zabbix", "external.solarwinds_orion", "external.rest_webhook"].includes(alert.event_type)) return;
+    setBusy(alert.id); setError(null); setNotice(null);
+    try {
+      await apiFetch(`/alerts/${encodeURIComponent(alert.id)}/resolve`, {
+        method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({actor: principal.subject}),
+      });
+      setNotice("Closed in iCheck and automatic investigation stopped. The monitoring source was not changed; closure does not prove fault recovery.");
+      await load();
+    } catch (cause) {setError(cause instanceof Error ? cause.message : "Closure failed");}
+    finally {setBusy(null);}
+  }
   return <main className="min-h-screen bg-slate-50 p-4 sm:p-8"><div className="mx-auto max-w-6xl space-y-6">
     <nav aria-label="Operations"><Link href="/">AI Operator</Link><span aria-hidden="true"> · </span><Link href="/investigations">Investigations</Link><span aria-hidden="true"> · </span><Link href="/assets/devices">Devices</Link><span aria-hidden="true"> · </span><Link href="/alerts/metric-rules">Prometheus metric rules</Link><span aria-hidden="true"> · </span><Link href="/alerts/alertmanager">Alertmanager</Link></nav>
     <header className="flex flex-wrap items-center justify-between gap-3"><div><h1 className="text-2xl font-semibold">Alert evidence</h1><p className="mt-2 text-sm text-muted-foreground">Collected source alerts, retained episodes and explicit acknowledgement. The AI workspace remains focused on investigations.</p></div><Button variant="outline" disabled={loading || busy !== null} onClick={() => void load()}>Refresh</Button></header>
@@ -108,6 +122,8 @@ export default function AlertsPage() {
       {!alerts.length && !loading && !error ? <p className="rounded-xl border bg-white p-8 text-center text-sm text-muted-foreground">No authorized alerts match this filter. Adding a device alone does not create a source alert.</p> : null}
       {alerts.map((alert) => <article key={alert.id} className="space-y-3 rounded-xl border bg-white p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-semibold">{alert.title}</h2><div className="mt-2 flex flex-wrap gap-2"><Badge variant="outline">{alert.severity}</Badge><Badge variant="outline">{alert.status}</Badge><span className="text-xs text-muted-foreground">{alert.event_type} · {alert.occurrence_count} observations</span></div></div>{canAcknowledge && alert.status === "open" ? <Button variant="outline" disabled={busy !== null || loading} onClick={() => void acknowledge(alert)} aria-label={`Acknowledge ${alert.title}`}>{busy === alert.id ? "Acknowledging…" : "Acknowledge"}</Button> : null}</div>
         {alert.description ? <p className="text-sm">{alert.description}</p> : null}<p className="break-all text-xs text-muted-foreground">Source {alert.entity_type}: {alert.entity_id} · First {new Date(alert.first_seen).toLocaleString()} · Last {new Date(alert.last_seen).toLocaleString()}</p>
+        {["external.zabbix", "external.solarwinds_orion", "external.rest_webhook"].includes(alert.event_type) && <div className="space-y-2"><p className="text-xs text-muted-foreground">Retained external alert episode. Acknowledgement does not stop AI; closure does. Local closure does not change the source or verify recovery.</p>
+          {canAcknowledge && alert.status !== "resolved" && <Button variant="outline" disabled={busy !== null || loading} onClick={() => void closeExternal(alert)}>Close in iCheck and stop AI</Button>}</div>}
         {alert.event_type==="metric.prometheus"&&<p className="text-xs text-amber-800">Alertmanager notification received. {alert.status==="resolved"?"Prometheus condition cleared; infrastructure recovery remains unverified.":"Acknowledgement will not clear the Prometheus condition."}</p>}
         {alert.event_type==="metric.prometheus"&&alert.details?.dashboard_url?.startsWith("https://")&&<a className="mr-4 inline-block text-sm text-violet-700 underline" href={alert.details.dashboard_url}>Open metric alert context in Grafana</a>}
         {alert.event_type==="metric.prometheus"&&alert.details?.investigation_url?.startsWith("/?brief=")&&<Link className="inline-block text-sm text-violet-700 underline" href={alert.details.investigation_url}>Prepare an AI investigation</Link>}

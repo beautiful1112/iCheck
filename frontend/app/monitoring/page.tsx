@@ -75,7 +75,7 @@ export default function MonitoringPage() {
   return <main className="min-h-screen bg-slate-50 p-4 sm:p-8"><div className="mx-auto max-w-7xl space-y-6">
     <nav aria-label="Monitoring navigation" className="flex flex-wrap gap-4 text-sm text-violet-700">
       <Link href="/">AI Operator</Link><Link href="/studio">Capability Studio</Link>
-      <Link href="/assets/devices">Assets</Link><Link href="/alerts">Alerts</Link>
+      <Link href="/assets/devices">Assets</Link><Link href="/alerts">Alerts</Link><Link href="/integrations">External monitoring integrations</Link>
       <Link href="/alerts/metric-rules">Metric alert rules</Link><Link href="/alerts/alertmanager">Alertmanager</Link><Link href="/settings/observability">Prometheus settings</Link>
     </nav>
     <header className="flex flex-wrap items-start justify-between gap-4">

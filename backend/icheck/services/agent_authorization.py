@@ -123,6 +123,13 @@ def require_tool_permissions(
     investigation: Investigation,
     tool: AgentToolRegistration,
 ) -> None:
+    from ..integration_tools import INTEGRATION_TOOLS
+    integration_handlers = {item["name"] for item in INTEGRATION_TOOLS}
+    if tool.name in integration_handlers or tool.handler in integration_handlers:
+        if (tool.name != tool.handler or tool.transport != "internal" or not tool.read_only
+                or tool.change_contract is not None
+                or not permission_snapshot_allows(investigation, ["alerts.read", "assets.read", "metrics.read"])):
+            raise PermissionError("External evidence requires its native scoped read-only contract")
     from ..autonomy_tools import AUTONOMY_TOOLS
     assistance = {item["name"] for item in AUTONOMY_TOOLS}
     if tool.name in assistance or tool.handler in assistance:

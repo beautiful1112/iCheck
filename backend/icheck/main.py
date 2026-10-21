@@ -21,12 +21,14 @@ from .inventory_views_api import router as inventory_views_router
 from .collector_api import router as collector_router
 from .capability_catalog_api import router as capability_catalog_router
 from .capability_pack_api import router as capability_pack_router
+from .operations_package_api import router as operations_package_router
 from .capability_promotion_api import router as capability_promotion_router
 from .capability_transparency_api import router as capability_transparency_router
 from .capability_pack_revocation_api import (
     router as capability_pack_revocation_router,
 )
 from .metrics_api import router as metrics_router
+from .integration_api import router as integration_router
 from .grafana_api import router as grafana_router
 from .research_api import router as research_router
 from .autonomy_api import router as autonomy_router
@@ -114,7 +116,7 @@ app = FastAPI(
 )
 @app.exception_handler(RequestValidationError)
 async def redact_auth_validation(request: Request, exc: RequestValidationError):
-    if not request.url.path.startswith(("/api/v1/auth/", "/api/v1/ai/", "/api/v1/research/", "/api/v1/device-credentials", "/api/v1/grafana/", "/api/v1/metric-alerts/", "/api/v1/assets/", "/api/v1/capability-studio/")):
+    if not request.url.path.startswith(("/api/v1/auth/", "/api/v1/ai/", "/api/v1/research/", "/api/v1/device-credentials", "/api/v1/grafana/", "/api/v1/metric-alerts/", "/api/v1/assets/", "/api/v1/capability-studio/", "/api/v1/integrations/")):
         return await request_validation_exception_handler(request, exc)
     # FastAPI's default validation response echoes rejected input, including
     # secrets nested in a body or supplied as an unknown field.
@@ -138,10 +140,12 @@ app.include_router(inventory_views_router)
 app.include_router(collector_router)
 app.include_router(capability_catalog_router)
 app.include_router(capability_pack_router)
+app.include_router(operations_package_router)
 app.include_router(capability_promotion_router)
 app.include_router(capability_pack_revocation_router)
 app.include_router(capability_transparency_router)
 app.include_router(metrics_router)
+app.include_router(integration_router)
 app.include_router(grafana_router)
 app.include_router(research_router)
 app.include_router(autonomy_router)

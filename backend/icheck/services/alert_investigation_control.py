@@ -87,6 +87,10 @@ def stop_reason(db, investigation, *, cache=None):
         return "Automatic investigation stopped: triggering alert is unavailable"
     if alert.status == AlertStatus.RESOLVED:
         return "Automatic investigation stopped: triggering alert was closed or resolved"
+    if alert.event_type in {"external.zabbix", "external.solarwinds_orion", "external.rest_webhook"}:
+        from .integration_alerts import stop_reason as external_stop_reason
+        reason = external_stop_reason(db, alert, live=True, cache=cache)
+        return "Automatic investigation stopped: " + reason if reason else None
     if alert.event_type == "metric.prometheus":
         return native_stop_reason(db, alert, cache=cache)
     return None  # Acknowledgement alone is not closure.

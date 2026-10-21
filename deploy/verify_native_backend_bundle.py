@@ -25,6 +25,8 @@ EXTERNAL_UNITS = {
 OPTIONAL_NATIVE_UNITS = {
     "icheck-alertmanager.service": "/opt/icheck/bin/alertmanager",
     "icheck-snmp-module-installer.service": "/opt/icheck/.venv/bin/python -I -m icheck.snmp_install_broker",
+    "icheck-integration-sync-worker.service": "/opt/icheck/.venv/bin/python -m icheck.integration_sync_worker",
+    "icheck-integration-alert-worker.service": "/opt/icheck/.venv/bin/python -m icheck.integration_alert_worker",
 }
 REQUIRED_PYTHON_UNITS = {
     "icheck-agent-capacity@.service", "icheck-agent-worker.service",
@@ -254,12 +256,13 @@ def verify_bundle(bundle: Path, units: Path) -> dict:
         prefix = "/opt/icheck/.venv/bin/"
         if unit.name in OPTIONAL_NATIVE_UNITS:
             expected=OPTIONAL_NATIVE_UNITS[unit.name]
-            if unit.name=="icheck-snmp-module-installer.service":
+            if expected.startswith(prefix + "python "):
                 starts=re.findall(r"^ExecStart=(.+)$",content,re.MULTILINE)
-                if starts!=[expected]: raise ValueError("SNMP installer requires its fixed isolated native module command")
+                if starts!=[expected]: raise ValueError("Optional worker requires its fixed native module command")
+                module = expected.split(" -m ", 1)[1].replace(".", "/") + ".py"
                 with ZipFile(product) as archive:
-                    if "icheck/snmp_install_broker.py" not in archive.namelist():
-                        raise ValueError("SNMP installer module is absent from the installed wheel")
+                    if module not in archive.namelist():
+                        raise ValueError("Optional worker module is absent from the installed wheel")
             elif command!=expected:
                 raise ValueError(f"{unit.name}: ExecStart is outside the native release contract")
             optional_units.append(unit.name)

@@ -1679,6 +1679,8 @@ BUILTIN_AGENT_TOOLS += RESEARCH_TOOLS
 from .autonomy_tools import AUTONOMY_TOOLS
 BUILTIN_AGENT_TOOLS += AUTONOMY_TOOLS
 BUILTIN_AGENT_TOOLS += METRIC_ALERT_TOOLS
+from .integration_tools import INTEGRATION_TOOLS
+BUILTIN_AGENT_TOOLS += INTEGRATION_TOOLS
 
 BUILTIN_AGENT_TOOLS += ({"name": "platform.diagnose_ai_runtime", "handler": "platform.diagnose_ai_runtime",
     "description": "Diagnose an authorized failed AI investigation using retained model-attempt evidence and propose an in-product repair. Works without additional model inference, never reads secrets, changes configuration, retries tasks or adds devices. Human approval is required in the configuration GUI.",
@@ -1725,6 +1727,17 @@ def ensure_builtin_agent_tools(
                     and existing.transport == "internal" and existing.read_only
                     and "site" in existing.input_schema.get("required", [])):
                 existing.input_schema = document["input_schema"]
+            if (existing.name == "integrations.history.query" and existing.created_by == "system.bootstrap"
+                    and existing.handler == existing.name and existing.transport == "internal" and existing.read_only
+                    and existing.input_schema.get("properties", {}).get("metric_id") ==
+                    {"type": "string", "pattern": "^[1-9][0-9]{0,19}$"}):
+                # Provider-native metric IDs may be names, not only Zabbix item
+                # numbers. Do not alter customized registrations.
+                previous = {**document["input_schema"], "properties": {
+                    **document["input_schema"]["properties"],
+                    "metric_id": {"type": "string", "pattern": "^[1-9][0-9]{0,19}$"}}}
+                if existing.input_schema == previous:
+                    existing.input_schema = document["input_schema"]
             tools.append(existing)
             continue
         tools.append(

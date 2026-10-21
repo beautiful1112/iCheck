@@ -55,7 +55,19 @@ def test_no_host_configuration_or_credentials_in_defaults():
     assert not any('TOKEN' in name or 'PASSWORD' in name for name in installer.common_environment())
     assert 'docker' not in installer.SERVICES
     assert 'icheck-agent-worker' in installer.SERVICES
-    assert installer.HEAD == 'a4g6i8k0m2p5'
+    assert installer.HEAD == 'h1n3q5s7u9w2'
+
+
+@pytest.mark.parametrize('kind', ['sync', 'alert'])
+def test_integration_worker_has_dedicated_identity_and_protected_credential_mount(kind):
+    assert installer.WORKERS[f'integration-{kind}-worker'] == (f'icheck_integration_{kind}', f'icheck-integration-{kind}')
+    assert f'icheck-integration-{kind}-worker' in installer.SERVICES
+    unit = (DEPLOY / f'systemd/icheck-integration-{kind}-worker.service').read_text()
+    assert 'LoadCredential=integration-key:/etc/icheck/ai-managed-secret.key' in unit
+    assert 'Environment=ICHECK_AI_MANAGED_SECRET_KEY_FILE=%d/integration-key' in unit
+    assert f'User=icheck-integration-{kind}' in unit and 'ProtectSystem=strict' in unit
+    env = installer.internal_worker_environment(f'integration-{kind}-worker', 'fixture-database-url')
+    assert not any('TOKEN' in key or 'PASSWORD' in key or 'SECRET' in key for key in env)
 
 
 def test_all_downloads_pinned_https():
@@ -63,6 +75,23 @@ def test_all_downloads_pinned_https():
         assert url.startswith('https://')
         assert 'latest' not in url
         assert len(digest) == 64 and int(digest, 16)
+
+
+def test_integration_policy_is_shared_deny_by_default(monkeypatch):
+    writes = {}
+    monkeypatch.setattr(installer, 'directory', lambda *args, **kwargs: None)
+    monkeypatch.setattr(installer, 'write_new',
+                        lambda path, content, **kwargs: writes.update({str(path): (content, kwargs)}))
+    installer.configure_integration_policy()
+    content, options = writes['/etc/icheck/monitoring-integrations.env']
+    assert content.endswith('ICHECK_MONITORING_INTEGRATION_ALLOWED_ORIGINS=\n')
+    assert options['mode'] == 0o600
+    assert len(writes) == 5
+    for path, (content, _) in writes.items():
+        if path.endswith('.conf'):
+            assert 'EnvironmentFile=/etc/icheck/monitoring-integrations.env' in content
+    dispatcher = writes['/etc/systemd/system/icheck-workflow-dispatch-worker.service.d/monitoring-integrations.conf'][0]
+    assert 'LoadCredential=integration-key:' in dispatcher
 
 
 def test_only_migration_owner_can_bypass_forced_namespace_rls():

@@ -15,6 +15,17 @@ def test_lease_profile_is_explicit_and_does_not_reach_approval_or_secret_tables(
     assert not any(set(privileges) - {"SELECT", "INSERT", "UPDATE"} for privileges in profile.values())
 
 
+def test_integration_worker_can_progress_but_cannot_authorize_or_rotate_credentials():
+    profile = grants.PROFILES["integration-sync-worker"]
+    assert set(profile) == {"alembic_version", "tenants", "regions", "monitoring_integration_connections",
+        "monitoring_integration_schedules", "monitoring_integration_syncs", "monitoring_integration_resources", "audit_events"}
+    columns = grants.COLUMN_GRANTS["integration-sync-worker"]
+    assert columns["monitoring_integration_connections"]["UPDATE"] == ("updated_at",)
+    assert not {"enabled", "revision", "connection_revision", "interval_seconds", "updated_by"}.intersection(
+        columns["monitoring_integration_schedules"]["UPDATE"])
+    assert not any("DELETE" in privileges for privileges in profile.values())
+
+
 @pytest.mark.parametrize("profile", sorted(grants.PROFILES))
 def test_all_profiles_name_real_columns_and_never_grant_blanket_update_or_destruction(profile):
     tables = grants.PROFILES[profile]

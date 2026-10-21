@@ -30,9 +30,9 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, HTTPRedirectHandler, HTTPSHandler, ProxyHandler, build_opener
 
-VERSION = '0.1.0-preview.r19.27'
-HEAD = 'a4g6i8k0m2p5'
-APP = 'icheck-engineering-preview-0-1-0-r19-26-public-linux-amd64'
+VERSION = '0.1.0-preview.r19.28'
+HEAD = 'h1n3q5s7u9w2'
+APP = 'icheck-engineering-preview-0-1-0-r19-28-public-linux-amd64'
 TENANT = '00000000-0000-0000-0000-000000000001'
 REGION = '00000000-0000-0000-0000-000000000002'
 STATE = Path('/var/lib/icheck-installer')
@@ -41,6 +41,8 @@ CONFIG = Path('/etc/icheck')
 BASE_ENV = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'HOME': '/root',
             'LANG': 'C.UTF-8', 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONNOUSERSITE': '1'}
 WORKERS = {
+    'integration-sync-worker': ('icheck_integration_sync', 'icheck-integration-sync'),
+    'integration-alert-worker': ('icheck_integration_alert', 'icheck-integration-alert'),
     'projection-worker': ('icheck_projection', 'icheck-projection'),
     'indicator-worker': ('icheck_indicator', 'icheck-indicator'),
     'collector-lease-reconciler': ('icheck_lease_reconciler', 'icheck-lease-reconciler'),
@@ -447,6 +449,22 @@ def provisioning_umask():
     os.umask(0o027)
 
 
+def configure_integration_policy():
+    """Share a deny-by-default origin policy across all connector consumers."""
+    write_new(CONFIG / 'monitoring-integrations.env',
+              '# Add only approved exact HTTPS origins. Empty means no access.\n'
+              'ICHECK_MONITORING_INTEGRATION_ALLOWED_ORIGINS=\n', mode=0o600)
+    for service in ('control-plane', 'integration-sync-worker',
+                    'integration-alert-worker', 'workflow-dispatch-worker'):
+        dropin = Path('/etc/systemd/system') / ('icheck-' + service + '.service.d')
+        directory(dropin, mode=0o755)
+        content = '[Service]\nEnvironmentFile=/etc/icheck/monitoring-integrations.env\n'
+        if service == 'workflow-dispatch-worker':
+            content += ('LoadCredential=integration-key:/etc/icheck/ai-managed-secret.key\n'
+                        'Environment=ICHECK_AI_MANAGED_SECRET_KEY_FILE=%d/integration-key\n')
+        write_new(dropin / 'monitoring-integrations.conf', content, mode=0o644)
+
+
 def finish(payload, config):
     provisioning_umask()
     import yaml
@@ -501,6 +519,7 @@ def finish(payload, config):
                 'PORT': '3000', 'NEXT_TELEMETRY_DISABLED': '1'}, 'icheck-frontend')
     for unit in (operator / 'systemd').glob('*.service'):
         write_new(Path('/etc/systemd/system') / unit.name, unit.read_bytes(), mode=0o644)
+    configure_integration_policy()
     # Remote-worker templates do not depend on a local API. This installer is
     # single-node, so gate first registration on local readiness after a reboot.
     write_new(ROOT / 'wait_for_native_api.py', API_WAIT_SCRIPT, mode=0o644)

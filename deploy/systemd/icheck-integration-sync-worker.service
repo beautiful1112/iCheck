@@ -1,0 +1,31 @@
+[Unit]
+Description=iCheck scheduled external monitoring inventory synchronization
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=icheck-integration-sync
+Group=icheck-integration-sync
+UMask=0077
+WorkingDirectory=/opt/icheck
+EnvironmentFile=/etc/icheck/integration-sync-worker.env
+# A protected service credential, not membership in the API's secret-reading group.
+LoadCredential=integration-key:/etc/icheck/ai-managed-secret.key
+Environment=ICHECK_AI_MANAGED_SECRET_KEY_FILE=%d/integration-key
+ExecStart=/opt/icheck/.venv/bin/python -m icheck.integration_sync_worker
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

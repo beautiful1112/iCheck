@@ -9850,6 +9850,176 @@ class ControlPlaneWorkloadExchange(Base):
     )
 
 
+class OperationsPackageInstallation(Base):
+    __tablename__ = "operations_package_installations"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "region_id", "name", "version", name="uq_operations_package_version"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(80))
+    version: Mapped[str] = mapped_column(String(64))
+    digest_sha256: Mapped[str] = mapped_column(String(64))
+    package: Mapped[dict] = mapped_column(JSON)
+    bindings: Mapped[dict] = mapped_column(JSON)
+    artifact_version_ids: Mapped[list[str]] = mapped_column(JSON)
+    installed_by: Mapped[str] = mapped_column(String(255))
+    installed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MonitoringIntegrationConnection(Base):
+    __tablename__ = "monitoring_integration_connections"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "region_id", "name", name="uq_monitoring_integration_name"),
+        CheckConstraint("revision > 0", name="ck_monitoring_integration_revision"),
+        CheckConstraint("provider IN ('zabbix','solarwinds_orion','rest_webhook')", name="ck_monitoring_integration_provider"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(128))
+    provider: Mapped[str] = mapped_column(String(32))
+    api_url: Mapped[str] = mapped_column(String(2048))
+    group_ids: Mapped[list[str]] = mapped_column(JSON)
+    encrypted_token: Mapped[bytes] = mapped_column(LargeBinary)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    last_test_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_test_error: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_test_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    @property
+    def token_configured(self) -> bool:
+        return bool(self.encrypted_token)
+
+
+class MonitoringIntegrationSync(Base):
+    __tablename__ = "monitoring_integration_syncs"
+    __table_args__ = (
+        CheckConstraint("status IN ('in_progress','completed','failed','superseded')", name="ck_integration_sync_status"),
+        CheckConstraint("cursor >= 0 AND cursor <= total AND total <= 10000 AND observed >= 0 AND observed <= cursor", name="ck_integration_sync_progress"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    connection_id: Mapped[str] = mapped_column(ForeignKey("monitoring_integration_connections.id", ondelete="RESTRICT"), index=True)
+    connection_revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32))
+    host_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    cursor: Mapped[int] = mapped_column(Integer, default=0)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    observed: Mapped[int] = mapped_column(Integer, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(255))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @property
+    def can_resume(self):
+        return self.host_ids is not None and self.status in {"in_progress", "failed"}
+
+
+class MonitoringIntegrationResource(Base):
+    __tablename__ = "monitoring_integration_resources"
+    __table_args__ = (UniqueConstraint("tenant_id", "region_id", "connection_id", "remote_id", name="uq_integration_resource_identity"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    connection_id: Mapped[str] = mapped_column(ForeignKey("monitoring_integration_connections.id", ondelete="RESTRICT"), index=True)
+    connection_revision: Mapped[int] = mapped_column(Integer)
+    remote_id: Mapped[str] = mapped_column(String(20))
+    name: Mapped[str] = mapped_column(String(255))
+    monitoring_enabled: Mapped[bool] = mapped_column(Boolean)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_run_id: Mapped[str] = mapped_column(ForeignKey("monitoring_integration_syncs.id", ondelete="RESTRICT"))
+
+
+class MonitoringIntegrationAlertFeed(Base):
+    __tablename__ = "monitoring_integration_alert_feeds"
+    __table_args__ = (
+        CheckConstraint("revision > 0 AND connection_revision > 0", name="ck_integration_alert_feed_revision"),
+        CheckConstraint("interval_seconds >= 60 AND interval_seconds <= 3600", name="ck_integration_alert_feed_interval"),
+        CheckConstraint("phase IN ('bootstrap','new','reconcile')", name="ck_integration_alert_feed_phase"),
+    )
+    connection_id: Mapped[str] = mapped_column(ForeignKey("monitoring_integration_connections.id", ondelete="RESTRICT"), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    connection_revision: Mapped[int] = mapped_column(Integer)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    cursor: Mapped[str] = mapped_column(String(20), default="0")
+    bootstrap_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    phase: Mapped[str] = mapped_column(String(16), default="bootstrap")
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_by: Mapped[str] = mapped_column(String(255))
+
+
+class MonitoringIntegrationEvent(Base):
+    __tablename__ = "monitoring_integration_events"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "region_id", "connection_id", "remote_id", name="uq_integration_event_identity"),
+        UniqueConstraint("alert_id", name="uq_integration_event_alert"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    connection_id: Mapped[str] = mapped_column(ForeignKey("monitoring_integration_connections.id", ondelete="RESTRICT"), index=True)
+    connection_revision: Mapped[int] = mapped_column(Integer)
+    remote_id: Mapped[str] = mapped_column(String(20))
+    observation: Mapped[dict] = mapped_column(JSON)
+    available: Mapped[bool] = mapped_column(Boolean, default=True)
+    source_resolved: Mapped[bool] = mapped_column(Boolean, default=False)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    alert_id: Mapped[str | None] = mapped_column(ForeignKey("alerts.id", ondelete="RESTRICT"), nullable=True)
+    resource_id: Mapped[str | None] = mapped_column(ForeignKey("monitoring_integration_resources.id", ondelete="RESTRICT"), nullable=True)
+    binding_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stop_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class MonitoringIntegrationBinding(Base):
+    __tablename__ = "monitoring_integration_bindings"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "region_id", "connection_id", "device_id", name="uq_integration_binding_device"),
+        CheckConstraint("revision > 0 AND connection_revision > 0", name="ck_integration_binding_revision"),
+    )
+    resource_id: Mapped[str] = mapped_column(ForeignKey("monitoring_integration_resources.id", ondelete="RESTRICT"), primary_key=True)
+    connection_id: Mapped[str] = mapped_column(ForeignKey("monitoring_integration_connections.id", ondelete="RESTRICT"), index=True)
+    device_id: Mapped[str | None] = mapped_column(ForeignKey("devices.id", ondelete="RESTRICT"), nullable=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    connection_revision: Mapped[int] = mapped_column(Integer)
+    source_name: Mapped[str] = mapped_column(String(255))
+    device_identity_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reviewed_by: Mapped[str] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MonitoringIntegrationSchedule(Base):
+    __tablename__ = "monitoring_integration_schedules"
+    __table_args__ = (
+        CheckConstraint("revision > 0 AND connection_revision > 0", name="ck_integration_schedule_revision"),
+        CheckConstraint("interval_seconds >= 300 AND interval_seconds <= 86400", name="ck_integration_schedule_interval"),
+        CheckConstraint("retention_days >= 7 AND retention_days <= 365", name="ck_integration_schedule_retention"),
+        CheckConstraint("failures >= 0", name="ck_integration_schedule_failures"),
+    )
+    connection_id: Mapped[str] = mapped_column(ForeignKey("monitoring_integration_connections.id", ondelete="RESTRICT"), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    connection_revision: Mapped[int] = mapped_column(Integer)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=900)
+    retention_days: Mapped[int] = mapped_column(Integer, default=30)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    active_run_id: Mapped[str | None] = mapped_column(ForeignKey("monitoring_integration_syncs.id", ondelete="RESTRICT"), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_by: Mapped[str] = mapped_column(String(255))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class GrafanaConnection(Base):
     __tablename__ = "grafana_connections"
     __table_args__ = (

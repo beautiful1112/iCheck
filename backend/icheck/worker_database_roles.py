@@ -18,6 +18,17 @@ from .checkpoint_schema import postgres_dsn
 ROLE_PATTERN = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
 PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
 PROFILES = {
+    "integration-sync-worker": {
+        "alembic_version": ("SELECT",),
+        "tenants": ("SELECT",),
+        "regions": ("SELECT",),
+        # Encrypted integration tokens only; other credential stores are excluded.
+        "monitoring_integration_connections": ("SELECT",),
+        "monitoring_integration_schedules": ("SELECT",),
+        "monitoring_integration_syncs": ("SELECT", "INSERT"),
+        "monitoring_integration_resources": ("SELECT", "INSERT"),
+        "audit_events": ("INSERT",),
+    },
     "ecosystem-transport-worker": {
         "alembic_version": ("SELECT",),
         "tenants": ("SELECT",),
@@ -301,6 +312,19 @@ COLUMN_GRANTS = {"collector-lease-reconciler": {
         "failed_runs", "last_gate_result",
     )},
 }}
+COLUMN_GRANTS["integration-sync-worker"] = {
+    "monitoring_integration_connections": {"UPDATE": ("updated_at",)},  # Required for row locks only.
+    "monitoring_integration_schedules": {"UPDATE": (
+        "next_run_at", "active_run_id", "lease_token", "lease_expires_at", "failures",
+        "last_attempt_at", "last_success_at", "last_error",
+    )},
+    "monitoring_integration_syncs": {"UPDATE": (
+        "host_ids", "cursor", "observed", "status", "error_code", "updated_at", "finished_at",
+    )},
+    "monitoring_integration_resources": {"UPDATE": (
+        "name", "monitoring_enabled", "observed_at", "last_run_id", "connection_revision",
+    )},
+}
 COLUMN_GRANTS["rollout-worker"] = {
     # NOWAIT shared reference locks require one real writable timestamp.
     "devices": {"UPDATE": ("updated_at",)},
@@ -458,6 +482,39 @@ REGISTRY_TABLES = {"alembic_version", "tenants", "regions"}
 NAMESPACE_EXEMPT_METADATA = {"workflow-dispatch-worker": frozenset({
     "control_plane_principals", "control_plane_roles", "control_plane_role_bindings",
 })}
+PROFILES["workflow-dispatch-worker"].update({table: ("SELECT",) for table in (
+    "monitoring_integration_connections", "monitoring_integration_alert_feeds", "monitoring_integration_events",
+    "monitoring_integration_resources", "monitoring_integration_bindings")})
+
+# This reader can project source episodes and cancel their automatic runs, but
+# cannot approve a mapping, enable a feed, enqueue AI, or change device credentials.
+PROFILES["integration-alert-worker"] = {
+    **{table: ("SELECT",) for table in ("alembic_version", "tenants", "regions", "devices",
+        "monitoring_integration_connections", "monitoring_integration_alert_feeds",
+        "monitoring_integration_resources", "monitoring_integration_bindings",
+        "alert_investigation_events", "agent_executions", "investigations",
+        # Existing alert trigger checks that this is not a retired Collector source.
+        "collector_condition_sources")},
+    "monitoring_integration_events": ("SELECT", "INSERT"),
+    "alerts": ("SELECT", "INSERT"),
+    "agent_execution_events": ("SELECT", "INSERT"),
+    "audit_events": ("INSERT",),
+}
+COLUMN_GRANTS["integration-alert-worker"] = {
+    "monitoring_integration_connections": {"UPDATE": ("updated_at",)},
+    "monitoring_integration_alert_feeds": {"UPDATE": (
+        "next_run_at", "cursor", "bootstrap_ids", "phase", "failures", "last_error", "last_attempt_at", "last_success_at")},
+    "monitoring_integration_events": {"UPDATE": (
+        "connection_revision", "observation", "available", "source_resolved", "checked_at", "alert_id",
+        "resource_id", "binding_revision", "stopped_at", "stop_reason")},
+    "alerts": {"UPDATE": ("last_seen", "title", "details", "severity", "status", "resolved_at", "resolved_by",
+                          "acknowledged_at", "acknowledged_by")},
+    "agent_executions": {"UPDATE": (
+        "cancellation_requested_at", "cancellation_requested_by", "cancellation_reason", "status", "finished_at",
+        "worker_id", "lease_token_hash", "lease_expires_at", "updated_at")},
+    "investigations": {"UPDATE": ("status", "finished_at", "updated_at")},
+}
+
 COLUMN_GRANTS["workflow-dispatch-worker"] = {
     # Admission mutex/heartbeat only; cannot enable or widen standing policy.
     "alert_investigation_policies": {"UPDATE": ("dispatcher_seen_at", "dispatcher_status")},

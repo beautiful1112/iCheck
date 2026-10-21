@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     worker_mtls_mode: Literal["disabled", "optional", "required"] = "disabled"
     worker_mtls_trusted_proxies: str = "127.0.0.1/32,::1/128"
     metrics_allowed_hosts: str = ""
+    # Exact HTTPS origins, including non-default ports. No wildcard egress.
+    monitoring_integration_allowed_origins: str = ""
     logs_allowed_hosts: str = ""
     ai_allowed_hosts: str = ""
     # Native installer provisions this key once, outside SQL and application bundles.

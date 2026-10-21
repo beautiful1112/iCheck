@@ -1,19 +1,15 @@
 {
   "format_version": "icheck.public-preview-qualification/v1",
-  "release": "0.1.0-preview.r19.26",
-  "scope": "Sanitized distribution based on r19.26; no operator database, credentials or test enrollment",
+  "release": "0.1.0-preview.r19.28",
+  "scope": "Sanitized N1–N3 distribution; no operator database, credentials or test enrollment",
   "private_runtime_state_included": false,
   "publication_checks": {
-    "focused_backend_and_deployment_tests_passed": 202,
-    "environment_dependent_tests_skipped": 2,
-    "frontend_tests_passed": 187,
+    "focused_backend_and_deployment_tests_passed": 476,
+    "environment_dependent_tests_skipped": 0,
+    "frontend_tests_passed": 206,
     "native_frontend_production_build": "passed",
-    "source_and_artifact_secret_audit": "passed before upload",
-    "existing_history_commits_scanned": 2,
-    "tracked_publication_policy": "passed; no runtime-state paths or CJK text",
-    "live_distinctive_credential_values_checked_in_memory": 14,
-    "live_short_credential_literal_contexts_checked": 3,
-    "live_credential_matches": 0,
+    "source_and_artifact_secret_audit": "Required before upload; final result in the release acceptance asset",
+    "tracked_publication_policy": "Required before upload; no runtime-state paths or CJK text",
     "gitleaks_version": "8.30.1",
     "scanner_exceptions": [
       "Two annotated synthetic curl rejection-test lines",
@@ -22,10 +18,10 @@
   },
   "qualification": {
     "live_lab_acceptance": "pending",
-    "clean_host_installation": "pending",
+    "clean_host_installation": "Recorded separately for the exact installer in the release acceptance asset",
     "paid_provider_qualification": "not performed"
   },
-  "changes_from_deployed_r19_26": [
+  "publication_defaults": [
     "English-only provider labels and documentation",
     "Private receipts and host-specific maintenance scripts excluded",
     "Monitoring profile provisioning requires explicitly supplied CIDRs",

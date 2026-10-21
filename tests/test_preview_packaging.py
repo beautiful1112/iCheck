@@ -89,7 +89,9 @@ def bundle_fixture(tmp_path,monkeypatch):
         "backend_runtime_manifest":"backend-runtime/backend-runtime.json","backend_constraints":"backend-runtime/backend-constraints.txt","backend_wheelhouse":"backend-wheelhouse",
         "frontend_package":"frontend","frontend_build_id":"fixture","selected_backend_extras":["windows"],"selected_runtime":f"{platform.python_implementation()} {platform.python_version()} on {platform.system()} {platform.machine()}",
         "cryptographic_release_signature":False,"backend_wheel_count":2}))
-    with ZipFile(bundle/runtime["wheel"],"w") as wheel: wheel.writestr("icheck/snmp_install_broker.py","# fixture module")
+    with ZipFile(bundle/runtime["wheel"],"w") as wheel:
+        for module in ("snmp_install_broker", "integration_sync_worker", "integration_alert_worker"):
+            wheel.writestr(f"icheck/{module}.py", "# fixture module")
     (bundle/"backend-wheelhouse/packaging-26.3-py3-none-any.whl").write_text("fixture")
     (bundle/"backend-wheelhouse/uvicorn-0.34.0-py3-none-any.whl").write_text("fixture")
     from packaging.version import Version
@@ -118,7 +120,24 @@ def test_optional_broker_cannot_substitute_python_code_or_drop_isolation(tmp_pat
     bundle,units=bundle_fixture(tmp_path,monkeypatch)
     target=units/"icheck-snmp-module-installer.service"
     target.write_text(target.read_text().replace("python -I -m icheck.snmp_install_broker","python -m icheck.snmp_install_broker"))
-    with pytest.raises(ValueError,match="fixed isolated"): verifier.verify_bundle(bundle,units)
+    with pytest.raises(ValueError,match="fixed native"): verifier.verify_bundle(bundle,units)
+
+
+@pytest.mark.parametrize("kind", ("sync", "alert"))
+def test_native_integration_workers_have_isolated_accounts_and_exact_commands(tmp_path, monkeypatch, kind):
+    from deploy import stage_native_backend as stage
+    from deploy import switch_native_backend as switch
+    account = "icheck-integration-" + kind
+    unit = account + "-worker.service"
+    assert stage.SERVICE_ACCOUNTS[account] == ()
+    assert unit in switch.PLAIN_UNITS
+    bundle, units = bundle_fixture(tmp_path, monkeypatch)
+    target = units / unit
+    original = target.read_text()
+    assert "LoadCredential=integration-key:" in original
+    target.write_text(original.replace(" -m icheck.", " -m unreviewed."))
+    with pytest.raises(ValueError, match="fixed native"):
+        verifier.verify_bundle(bundle, units)
 
 
 @pytest.mark.parametrize('fault',(None,'broker_running','wrong_external_command','unknown_unit'))

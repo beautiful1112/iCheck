@@ -320,6 +320,7 @@ def emit_alert_event(
 @router.get("/alerts", response_model=list[AlertRead], tags=["alerts"])
 def list_alerts(
     db: DBSession,
+    alert_id: str | None = Query(default=None, min_length=1, max_length=36),
     alert_status: AlertStatus | None = Query(default=None, alias="status"),
     severity: AlertSeverity | None = None,
     device_id: str | None = Query(default=None, min_length=1, max_length=36),
@@ -328,6 +329,8 @@ def list_alerts(
     principal: PrincipalContext = Depends(require_permissions("alerts.read")),
 ) -> list[Alert]:
     query = select(Alert).where(alert_scope_clause(principal))
+    if alert_id:
+        query = query.where(Alert.id == alert_id)
     if device_id:
         query = query.where(Alert.entity_type == "device", Alert.entity_id == device_id)
     if not include_superseded:

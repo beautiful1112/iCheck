@@ -1,0 +1,30 @@
+[Unit]
+Description=iCheck external alert synchronization and investigation stop propagation
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=icheck-integration-alert
+Group=icheck-integration-alert
+UMask=0077
+WorkingDirectory=/opt/icheck
+EnvironmentFile=/etc/icheck/integration-alert-worker.env
+LoadCredential=integration-key:/etc/icheck/ai-managed-secret.key
+Environment=ICHECK_AI_MANAGED_SECRET_KEY_FILE=%d/integration-key
+ExecStart=/opt/icheck/.venv/bin/python -m icheck.integration_alert_worker
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

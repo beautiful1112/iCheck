@@ -17,8 +17,9 @@ def audit(root):
             continue
         files += 1
         if (name.startswith(('output/', 'tmp/', 'deploy/runtime/')) or
-            re.search(r'(^|/)(\.env|node_modules|\.next)(/|$)', name) or
-            path.suffix in {'.db', '.dump', '.pem', '.key', '.p12', '.pfx', '.pyc'}):
+            re.search(r'(^|/)(\.env|node_modules|\.next|\.playwright-cli|playwright-report|test-results)(/|$)', name) or
+            path.name == 'next-env.d.ts' or
+            path.suffix in {'.db', '.sqlite', '.sqlite3', '.dump', '.pem', '.key', '.p12', '.pfx', '.pyc', '.log'}):
             failures.append({'file': name, 'reason': 'runtime or secret-file path'})
         try:
             content = path.read_text()

@@ -18,12 +18,15 @@ ROOT_FILES = {
 }
 ROOT_DIRECTORIES = {'backend', 'frontend', 'tests', 'deploy', 'docs', '.github'}
 OMIT_PARTS = {'node_modules', '__pycache__', '.next', '.venext', '.vinext', '.wrangler',
-    '.sites-runtime', '.pytest_cache', '.ruff_cache', 'dist', '.git', '.venv'}
+    '.sites-runtime', '.pytest_cache', '.ruff_cache', 'dist', '.git', '.venv',
+    '.playwright-cli', 'playwright-report', 'test-results'}
 PRIVATE_TOOLS = {
     'upgrade_engineering_preview.py', 'check_multi_provider_deployment.py',
     'verify_multi_provider_http.py', 'preview_browser_session.py',
     'prepare_openrouter_r11_browser.mjs', 'provision_preview_monitoring.py',
     'sync_native_grafana_tool.py', 'preview_investigation_dispatch.py',
+    'preview_monitoring_integrations.py', 'check_n1_n3_deployment.py',
+    'verify_n1_n3_http.py',
 }
 
 
@@ -42,6 +45,7 @@ def export(repository: Path, destination: Path):
             if (not path.is_file() or path.is_symlink() or set(relative.parts) & OMIT_PARTS
                     or any(part.endswith('.egg-info') for part in relative.parts)
                     or str(relative).startswith('deploy/runtime/')
+                    or path.name == 'next-env.d.ts'
                     or (path.name.startswith('.env') and path.name != '.env.example')
                     or path.suffix in {'.pyc', '.pyo', '.db', '.sqlite', '.sqlite3', '.tsbuildinfo', '.log'}):
                 continue

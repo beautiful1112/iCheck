@@ -340,6 +340,7 @@ const navigation = [
   { label: "AI operator", icon: Sparkles, href: "/", active: true },
   { label: "Capability Studio", icon: Wrench, href: "/studio" },
   { label: "Monitoring", icon: Activity, href: "/monitoring" },
+  { label: "Integrations", icon: Boxes, href: "/integrations" },
   { label: "Investigations", icon: FileSearch, href: "/investigations" },
   { label: "Approvals", icon: ShieldCheck, href: "/approvals" },
   { label: "Device credentials", icon: ShieldCheck, href: "/settings/credentials" },

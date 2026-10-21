@@ -1,6 +1,6 @@
 """Build a native self-extracting installer from the published, verified payload.
 
-The application payload remains exactly r19.26; r19.27 adds installation tooling.
+The r19.28 payload includes the paired N1–N3 application and integration workers.
 Third-party system components are downloaded from pinned HTTPS URLs at install.
 """
 import argparse
@@ -11,8 +11,8 @@ from pathlib import Path, PurePosixPath
 import tarfile
 import tempfile
 
-APP_SHA256 = '6cef877b72e11cdd3ffa7d6ffa81ca23f991512b2da5f6ee3fe491c0f6ec2cb7'
-APP_ROOT = 'icheck-engineering-preview-0-1-0-r19-26-public-linux-amd64'
+APP_SHA256 = '02e9667ea4af0e3c3ddf837542893521f3a8a2d53aadf134c8d05d5f02d8992d'
+APP_ROOT = 'icheck-engineering-preview-0-1-0-r19-28-public-linux-amd64'
 FILES = {
     'installer/native_installer.py': 'deploy/native_installer.py',
     'installer/verify_native_installation.py': 'deploy/verify_native_installation.py',
@@ -39,7 +39,7 @@ set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
 if [[ "${1:-}" == "--help" ]]; then
-  echo "iCheck r19.27 native installer: fresh Ubuntu 24.04 x86_64, systemd, 3 GiB RAM, 10 GiB free."
+  echo "iCheck r19.28 native installer: fresh Ubuntu 24.04 x86_64, systemd, 3 GiB RAM, 10 GiB free."
   echo "Usage: sudo bash $0 [--server-ip IP --monitor-cidr CIDR --password-file ROOT_0600_FILE --yes]"
   echo "Interactive by default. Online dependencies. No Docker; no existing installation upgrades."
   echo "Use --check to verify the embedded payload without installing."
@@ -89,7 +89,7 @@ def build(application, source, destination):
                 info = tarfile.TarInfo(name)
                 info.size, info.mode, info.uid, info.gid, info.mtime = len(content), 0o644, 0, 0, 0
                 target.addfile(info, io.BytesIO(content))
-            content = json.dumps({'format': 'icheck.native-installer/v1', 'version': '0.1.0-preview.r19.27',
+            content = json.dumps({'format': 'icheck.native-installer/v1', 'version': '0.1.0-preview.r19.28',
                 'application_release': APP_ROOT, 'application_archive_sha256': APP_SHA256,
                 'platform': 'Ubuntu 24.04 x86_64', 'deployment': 'native-systemd',
                 'requires_docker': False, 'online_prerequisites': True, 'fresh_host_only': True,

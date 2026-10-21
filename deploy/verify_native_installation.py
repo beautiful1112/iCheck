@@ -73,6 +73,16 @@ def verify(password_file=None):
     checks.append('encrypted_search_settings_ready')
     assert api('/autonomy/alert-policy')['enabled'] is False
     checks.append('automatic_ai_investigation_disabled')
+    providers = api('/integrations/providers')
+    assert {item['provider'] for item in providers} == {'zabbix', 'solarwinds_orion', 'rest_webhook'}
+    assert api('/integrations/connections') == []
+    assert api('/operations-packages') == []
+    assert len(api('/operations-packages/builtins')) == 6
+    checks.append('external_monitoring_catalog_and_six_builtin_packages_available')
+    checks.append('no_external_connections_or_package_imports')
+    policy = Path('/etc/icheck/monitoring-integrations.env').read_text()
+    assert 'ICHECK_MONITORING_INTEGRATION_ALLOWED_ORIGINS=\n' in policy
+    checks.append('external_connector_network_access_disabled_until_configured')
     assets = 0
     for path in ('/login', '/grafana/login'):
         html = get(path).decode()
@@ -116,10 +126,11 @@ def verify(password_file=None):
     sql = """SELECT json_agg(json_build_object('name',rolname,'superuser',rolsuper,
         'bypass',rolbypassrls,'createdb',rolcreatedb,'createrole',rolcreaterole))
         FROM pg_roles WHERE rolname IN ('icheck_owner','icheck_api','icheck_projection',
-        'icheck_indicator','icheck_lease_reconciler','icheck_workflow_dispatch');"""
+        'icheck_indicator','icheck_lease_reconciler','icheck_workflow_dispatch',
+        'icheck_integration_sync','icheck_integration_alert');"""
     roles = json.loads(subprocess.check_output(['runuser', '-u', 'postgres', '--', 'psql',
                        '-XAt', '-d', 'icheck', '-c', sql], text=True))
-    assert len(roles) == 6
+    assert len(roles) == 8
     for role in roles:
         assert not role['superuser'] and not role['createdb'] and not role['createrole']
         assert role['bypass'] is (role['name'] == 'icheck_owner')

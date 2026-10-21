@@ -1,14 +1,14 @@
 # Native installation and upgrade
 
 For a new dedicated Ubuntu 24.04 x86_64 server, use the
-[r19.27 one-command installer](native-one-command-installer.md). It automates
+[r19.28 one-command installer](native-one-command-installer.md). It automates
 prerequisite installation and the first-install steps below. This manual remains
-the administrator reference for the r19.26 application payload and guarded
+the administrator reference for the r19.28 application payload and guarded
 upgrades; the new installer does not overwrite an existing installation.
 
 ## Scope and prerequisites
 
-Engineering Preview 0.1.0-preview.r19.26 is a native single-node evaluation
+Engineering Preview 0.1.0-preview.r19.28 is a native single-node evaluation
 distribution. Docker is not required. This guide is for a Linux administrator;
 the archive is not an unattended appliance installer. Start on a dedicated
 evaluation host, validate its setup, and only then consider controlled exposure.
@@ -27,7 +27,7 @@ or Python patch level passes the native verifier. Reserve space for retained
 releases, SQL backups, monitoring data and Grafana storage. No fleet-size claim
 is made by this preview.
 
-The database head is `a4g6i8k0m2p5`. Always deploy a matching backend and GUI.
+The database head is `h1n3q5s7u9w2`. Always deploy a matching backend and GUI.
 Published source retains synthetic tests and examples, not the private
 development host's saved state. See [qualification](../acceptance/public-preview-qualification.json).
 
@@ -38,7 +38,7 @@ Check the selected file before extraction:
 
 ```bash
 sha256sum --check --ignore-missing SHA256SUMS
-tar -tzf icheck-engineering-preview-0-1-0-r19-26-public-linux-amd64.tar.gz
+tar -tzf icheck-engineering-preview-0-1-0-r19-28-public-linux-amd64.tar.gz
 ```
 
 A checksum detects mismatch; it is not a cryptographic publisher signature.
